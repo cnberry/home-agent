@@ -1,8 +1,18 @@
-# Home Agent Codex–Telegram Agent
+# Home Agent
 
-Home Agent is a persistent, single-owner Telegram interface for Codex on a separate
-Ubuntu/Debian or Arch/Omarchy computer. Telegram is only the transport: every agent turn is run by the stable
-OpenAI Codex Python SDK and its pinned Codex runtime.
+![A tiny one-eyed robot receives a message and flips a switch](docs/assets/home-agent-hero.png)
+
+> **OpenClaw energy. Toaster-level ambition.**
+>
+> You ask. It does. Thinking not included. 😉
+
+Okay, Codex does the thinking. Home Agent is the deliberately boring bit in the middle: a tiny,
+persistent, single-owner Telegram remote control for Codex on a separate Ubuntu/Debian or
+Arch/Omarchy computer.
+
+There is no second agent framework, plugin universe, or orchestration maze. It authenticates one
+owner, queues each message, survives restarts, hands the work to the stable OpenAI Codex Python
+SDK, and brings the answer back. That's pretty much the trick.
 
 > [!WARNING]
 > Codex runs with `Sandbox.full_access` and `ApprovalMode.deny_all`, equivalent to
