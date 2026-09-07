@@ -10,15 +10,15 @@ from typing import Literal, Protocol
 
 from home_agent.codex_runtime import (
     CodexInterrupted,
+    CodexResult,
     CodexRunError,
-    CodexRuntime,
 )
 from home_agent.database import Database, Job
 
 LOGGER = logging.getLogger(__name__)
 REDACTIONS = (
     re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{20,}\b"),
-    re.compile(r"\b(?:sk|gh[opsu])_[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\b(?:sk[-_]|gh[opsur]_|github_pat_)[A-Za-z0-9_-]{16,}\b"),
 )
 
 
@@ -41,13 +41,30 @@ class Notifier(Protocol):
     async def retrying(self, job: Job, delay_seconds: int) -> None: ...
 
 
+class AgentRuntime(Protocol):
+    async def run(
+        self,
+        prompt: str,
+        *,
+        thread_id: str | None,
+        on_thread: Callable[[str], None],
+        on_turn_started: Callable[[], None],
+    ) -> CodexResult: ...
+
+    async def interrupt(self) -> bool: ...
+
+    async def archive(self, thread_id: str) -> None: ...
+
+    async def close(self) -> None: ...
+
+
 class Worker:
     RETRY_DELAYS = (30, 120, 300)
 
     def __init__(
         self,
         database: Database,
-        codex: CodexRuntime,
+        codex: AgentRuntime,
         notifier: Notifier,
         *,
         poll_seconds: float = 1.0,
@@ -58,6 +75,7 @@ class Worker:
         self.poll_seconds = poll_seconds
         self._stop = asyncio.Event()
         self._cancelled_job_id: int | None = None
+        self._thread_lock = asyncio.Lock()
 
     async def run(self) -> None:
         while not self._stop.is_set():
@@ -65,12 +83,16 @@ class Worker:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(self._stop.wait(), timeout=self.poll_seconds)
                 continue
-            job = self.database.claim_next()
+            async with self._thread_lock:
+                if self._stop.is_set():
+                    break
+                job = self.database.claim_next()
+                if job is not None:
+                    await self._process(job)
             if job is None:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(self._stop.wait(), timeout=self.poll_seconds)
                 continue
-            await self._process(job)
 
     async def stop(self) -> None:
         self._stop.set()
@@ -88,13 +110,17 @@ class Worker:
         snapshot = self.database.snapshot()
         if snapshot.active is not None or snapshot.queued:
             return False
-        thread_id = self.database.get_thread("telegram")
-        if thread_id:
-            try:
-                await self.codex.archive(thread_id)
-            except Exception as exc:
-                LOGGER.warning("could not archive Codex thread: %s", safe_error(exc))
-        self.database.clear_thread("telegram")
+        async with self._thread_lock:
+            snapshot = self.database.snapshot()
+            if snapshot.active is not None or snapshot.queued:
+                return False
+            thread_id = self.database.get_thread("telegram")
+            if thread_id:
+                try:
+                    await self.codex.archive(thread_id)
+                except Exception as exc:
+                    LOGGER.warning("could not archive Codex thread: %s", safe_error(exc))
+            self.database.clear_thread("telegram")
         return True
 
     async def _notify(self, operation: Callable[[], Awaitable[None]]) -> None:
@@ -108,12 +134,18 @@ class Worker:
         await self._notify(lambda: self.notifier.working(job))
         thread_id = self.database.get_thread(job.kind)
 
-        def mark_turn_started() -> None:
-            self.database.mark_codex_started(job.id)
+        def check_interrupted() -> None:
             if self._cancelled_job_id == job.id:
-                raise CodexInterrupted("cancelled before the turn began", turn_started=True)
+                raise CodexInterrupted("cancelled before the turn began", turn_started=False)
+            if self._stop.is_set():
+                raise CodexInterrupted("Home Agent is stopping", turn_started=False)
+
+        def mark_turn_started() -> None:
+            check_interrupted()
+            self.database.mark_codex_started(job.id)
 
         try:
+            check_interrupted()
             result = await self.codex.run(
                 job.prompt,
                 thread_id=thread_id,
@@ -123,6 +155,10 @@ class Worker:
         except CodexInterrupted as exc:
             cancelled = self._cancelled_job_id == job.id
             self._cancelled_job_id = None
+            current = self.database.get_job(job.id) or job
+            if not cancelled and not exc.turn_started and not current.codex_started:
+                self.database.requeue(job.id, 0, safe_error(exc))
+                return
             interrupt_status: Literal["cancelled", "uncertain"] = (
                 "cancelled" if cancelled else "uncertain"
             )
@@ -140,7 +176,11 @@ class Worker:
                 await self._notify(lambda: self.notifier.failed(job, "Cancelled by owner."))
             elif exc.authentication:
                 self.database.set_metadata("authentication_degraded", True)
-                self.database.finish(job.id, "failed", error)
+                self.database.finish(
+                    job.id,
+                    "uncertain" if exc.turn_started or current.codex_started else "failed",
+                    error,
+                )
                 message = (
                     "Codex authentication needs attention. "
                     "Run `agentctl auth` on the Home Agent host."
@@ -149,6 +189,7 @@ class Worker:
             elif (
                 exc.transient
                 and not exc.turn_started
+                and not current.codex_started
                 and current.attempts <= len(self.RETRY_DELAYS)
             ):
                 delay = self.RETRY_DELAYS[current.attempts - 1]
@@ -167,9 +208,13 @@ class Worker:
         except Exception as exc:
             error = safe_error(exc)
             current = self.database.get_job(job.id) or job
-            unexpected_status: Literal["uncertain", "failed"] = (
-                "uncertain" if current.codex_started else "failed"
-            )
+            unexpected_status: Literal["cancelled", "uncertain", "failed"]
+            if self._cancelled_job_id == job.id:
+                unexpected_status = "cancelled"
+                error = "Cancelled by owner."
+                self._cancelled_job_id = None
+            else:
+                unexpected_status = "uncertain" if current.codex_started else "failed"
             self.database.finish(job.id, unexpected_status, error)
             await self._notify(
                 lambda: self.notifier.failed(job, f"{unexpected_status.title()}: {error}")
@@ -188,7 +233,10 @@ class Worker:
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             },
         )
-        bridge_job = job.kind == "telegram" and job.telegram_chat_id is None
+        job = self.database.get_job(job.id) or job
+        bridge_job = (
+            job.kind == "telegram" and job.telegram_chat_id is None and job.ack_message_id is None
+        )
         if not bridge_job and (job.kind != "heartbeat" or result.response.strip() != "NOOP"):
             await self._notify(lambda: self.notifier.completed(job, result.response))
         LOGGER.info("job_completed id=%s kind=%s", job.id, job.kind)

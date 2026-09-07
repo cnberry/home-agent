@@ -61,7 +61,16 @@ chown "$backup_user:$backup_user" "$key" "$key.pub"
 chmod 0600 "$key"
 chmod 0644 "$key.pub"
 known_hosts_tmp=$(mktemp)
-trap 'rm -f -- "$known_hosts_tmp"' EXIT
+restore_in_progress=false
+trap '
+  rm -f -- "$known_hosts_tmp"
+  if [[ "$restore_in_progress" == true ]]; then
+    echo "Restore did not complete; units stopped for restore were not restarted." >&2
+    echo "Resolve the failure before restarting the agent, heartbeat, and backup units." >&2
+  fi
+' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # Published by GitHub at https://docs.github.com/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$known_hosts_tmp"
 install -o "$backup_user" -g "$backup_user" -m 0600 "$known_hosts_tmp" "$backup_root/.ssh/known_hosts"
@@ -79,6 +88,22 @@ if [[ -L "$checkout" ]]; then
   echo "$checkout must not be a symlink" >&2
   exit 1
 fi
+restore_active_units=()
+if [[ "$action" == "restore" ]]; then
+  for unit in home-agent-heartbeat.timer home-agent-state-backup.timer; do
+    case "$(systemctl show --property=ActiveState --value "$unit")" in
+      active|activating|reloading) restore_active_units+=("$unit") ;;
+    esac
+  done
+  restore_in_progress=true
+  systemctl stop home-agent-heartbeat.timer home-agent-state-backup.timer
+  for unit in home-agent.service home-agent-heartbeat.service home-agent-state-backup.service; do
+    case "$(systemctl show --property=ActiveState --value "$unit")" in
+      active|activating|reloading) restore_active_units+=("$unit") ;;
+    esac
+  done
+  systemctl stop home-agent.service home-agent-heartbeat.service home-agent-state-backup.service
+fi
 if [[ ! -d "$checkout/.git" ]]; then
   as_backup git clone "$repository" "$checkout"
 else
@@ -88,28 +113,49 @@ as_backup git -C "$checkout" config user.name "home-agent-state-backup"
 as_backup git -C "$checkout" config user.email "home-agent-state-backup@users.noreply.github.com"
 as_backup git -C "$checkout" config core.sshCommand "/usr/bin/ssh -i $key -o IdentitiesOnly=yes"
 remote_state=false
-if as_backup git -C "$checkout" ls-remote --exit-code --heads origin state-backup >/dev/null 2>&1; then
+if as_backup git -C "$checkout" ls-remote --exit-code --heads origin state-backup >/dev/null; then
   remote_state=true
-  as_backup git -C "$checkout" fetch origin state-backup
-  as_backup git -C "$checkout" switch -C state-backup origin/state-backup
 else
-  as_backup git -C "$checkout" switch --orphan state-backup
-  as_backup git -C "$checkout" rm -rf --ignore-unmatch .
+  remote_status=$?
+  if [[ "$remote_status" -ne 2 ]]; then
+    echo "Cannot inspect the remote state-backup branch; checkout was not reset." >&2
+    exit "$remote_status"
+  fi
+fi
+if [[ "$action" == "restore" && "$remote_state" == false ]]; then
+  echo "The remote state-backup branch does not exist." >&2
+  exit 1
+fi
+if [[ "$remote_state" == true ]]; then
+  as_backup git -C "$checkout" fetch origin \
+    +refs/heads/state-backup:refs/remotes/origin/state-backup
 fi
 if [[ "$action" == "restore" ]]; then
-  if [[ "$remote_state" == false ]]; then
-    echo "The remote state-backup branch does not exist." >&2
-    exit 1
+  as_backup git -C "$checkout" switch -C state-backup origin/state-backup
+elif as_backup git -C "$checkout" show-ref --verify --quiet refs/heads/state-backup; then
+  as_backup git -C "$checkout" switch state-backup
+elif [[ "$(as_backup git -C "$checkout" branch --show-current)" != state-backup ]]; then
+  if [[ "$remote_state" == true ]]; then
+    as_backup git -C "$checkout" switch --create state-backup --track origin/state-backup
+  else
+    as_backup git -C "$checkout" switch --orphan state-backup
+    as_backup git -C "$checkout" rm -rf --ignore-unmatch .
   fi
+fi
+if [[ "$action" == "restore" ]]; then
   HOME_AGENT_CONFIG=/etc/home-agent/config.toml \
     /opt/home-agent/current/venv/bin/agentctl restore
   chown home-agent:home-agent-state /var/lib/home-agent/durable/*.md
   chmod 0640 /var/lib/home-agent/durable/*.md
+  restore_in_progress=false
+  if ((${#restore_active_units[@]})); then
+    systemctl start "${restore_active_units[@]}"
+  fi
 else
   as_backup env HOME_AGENT_CONFIG=/etc/home-agent/config.toml \
     /opt/home-agent/current/venv/bin/agentctl backup
 fi
-if [[ ${HOME_AGENT_DEFER_ENABLE:-0} != 1 ]]; then
+if [[ "$action" != "restore" && ${HOME_AGENT_DEFER_ENABLE:-0} != 1 ]]; then
   systemctl enable --now home-agent-state-backup.timer
 fi
 echo "Durable-state backup $action completed."

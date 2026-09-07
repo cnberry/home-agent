@@ -79,3 +79,22 @@ with `/stop`, and force `/heartbeat`. Confirm another account and a group produc
 
 Run any machine-specific acceptance checks defined by the private deployment repository. Do not
 send live device actions as part of an unattended migration check.
+
+## Restore service coordination
+
+Both restore entry points pause the agent, heartbeat, and state-backup activity
+before changing the checkout or durable files. Successful backup-setup restores
+resume previously active units; `scripts/restore.sh` also starts the agent, as it
+did before. An inactive timer is not enabled merely because a restore succeeded.
+
+If restore fails after services are stopped, they remain stopped and the script
+prints a recovery warning. Resolve the reported failure and rerun the restore
+before restarting work. Manifest validation precedes destination writes, but
+replacement is atomic per file, not across all three durable files: a disk error
+or power loss can still interrupt a multi-file restore.
+
+The prior active-unit list is held only for the current restore run. After a
+failed run, explicitly restart the agent and any previously used timers once
+recovery succeeds; a rerun cannot infer which stopped timers were previously
+active. Do not run simultaneous restores or manually start these services while
+a restore is in progress.

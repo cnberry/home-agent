@@ -15,3 +15,12 @@
 - Home Agent Codex should have full access as a user would, escalating to sudo when needed.
 - Keep bootstrap and recovery procedures idempotent and suitable for clean Ubuntu/Debian and
   Arch/Omarchy systems.
+
+## Test design
+
+- Treat `docs/BEHAVIOR.md` as the language-neutral behavior contract.
+- Protect observable outcomes and failure boundaries, not Python implementation details.
+- Prefer public CLI, transport, queue, and restored-data scenarios. Keep SDK-specific checks at the external adapter boundary.
+- Do not assert source text, private helper calls, exact internal call counts, or incidental wording and model defaults.
+- Keep the suite minimal by covering distinct risks and parameterizing input classes, not by maximizing test count.
+- A rewrite in another language should retain the contract scenarios while replacing language-specific fixtures.

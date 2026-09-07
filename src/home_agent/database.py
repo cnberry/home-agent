@@ -164,6 +164,12 @@ class Database:
         now = utc_now()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if telegram_update_id is not None:
+                existing = db.execute(
+                    "SELECT id FROM jobs WHERE telegram_update_id = ?", (telegram_update_id,)
+                ).fetchone()
+                if existing:
+                    return None
             if deduplicate_kind:
                 existing = db.execute(
                     """
@@ -200,6 +206,11 @@ class Database:
             job_id = cursor.lastrowid
             if job_id is None:  # pragma: no cover - SQLite always supplies a row ID here
                 raise RuntimeError("SQLite did not return a job ID")
+            if telegram_update_id is not None:
+                db.execute(
+                    "INSERT OR IGNORE INTO updates(update_id, received_at) VALUES (?, ?)",
+                    (telegram_update_id, now),
+                )
             return self.get_job(job_id, connection=db)
 
     def set_ack_message(self, job_id: int, message_id: int) -> None:
@@ -271,6 +282,13 @@ class Database:
     def retry(self, job_id: int) -> Job | None:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            eligible = db.execute(
+                "SELECT id FROM jobs WHERE id = ? "
+                "AND status IN ('failed', 'uncertain', 'cancelled')",
+                (job_id,),
+            ).fetchone()
+            if eligible is None:
+                return None
             count = db.execute(
                 "SELECT COUNT(*) FROM jobs WHERE status IN ('queued', 'running')"
             ).fetchone()[0]
@@ -279,7 +297,8 @@ class Database:
             cursor = db.execute(
                 """
                 UPDATE jobs SET status = 'queued', available_at = ?, started_at = NULL,
-                    completed_at = NULL, error = NULL, response = NULL, codex_started = 0
+                    completed_at = NULL, error = NULL, response = NULL, codex_started = 0,
+                    attempts = 0
                 WHERE id = ? AND status IN ('failed', 'uncertain', 'cancelled')
                 """,
                 (utc_now(), job_id),
@@ -290,6 +309,7 @@ class Database:
 
     def recover_interrupted(self) -> list[Job]:
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             rows = db.execute("SELECT * FROM jobs WHERE status = 'running'").fetchall()
             if rows:
                 db.execute(
@@ -300,7 +320,11 @@ class Database:
                     """,
                     (utc_now(),),
                 )
-            return [job for row in rows if (job := self._job(row)) is not None]
+            return [
+                job
+                for row in rows
+                if (job := self.get_job(row["id"], connection=db)) is not None
+            ]
 
     def get_job(self, job_id: int, *, connection: sqlite3.Connection | None = None) -> Job | None:
         if connection is not None:
@@ -366,13 +390,14 @@ class Database:
                 ).fetchone()
             )
             last_completed = db.execute(
-                "SELECT completed_at FROM jobs WHERE status = 'completed' ORDER BY id DESC LIMIT 1"
+                "SELECT completed_at FROM jobs WHERE status = 'completed' "
+                "ORDER BY completed_at DESC, id DESC LIMIT 1"
             ).fetchone()
             last_heartbeat = db.execute(
                 """
                 SELECT completed_at FROM jobs
                 WHERE kind = 'heartbeat' AND status = 'completed'
-                ORDER BY id DESC LIMIT 1
+                ORDER BY completed_at DESC, id DESC LIMIT 1
                 """
             ).fetchone()
             return QueueSnapshot(

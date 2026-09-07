@@ -41,7 +41,13 @@ def test_change_only_backup_and_restore(tmp_path: Path) -> None:
 
     manifest = restore_backup(repo, restored)
     assert manifest["schema_version"] == 1
-    assert (restored / "tasks.md").read_text(encoding="utf-8") == "# tasks.md\n"
+    for name in ("tasks.md", "memory.md", "heartbeat.md"):
+        assert (restored / name).read_bytes() == (source / name).read_bytes()
+
+    (source / "tasks.md").write_text("# updated\n", encoding="utf-8")
+    assert perform_backup(source, repo, push=False).changed
+    restore_backup(repo, restored)
+    assert (restored / "tasks.md").read_text(encoding="utf-8") == "# updated\n"
 
 
 def test_rejects_symlinks_unexpected_names_and_tampering(tmp_path: Path) -> None:
@@ -69,6 +75,58 @@ def test_rejects_symlinks_unexpected_names_and_tampering(tmp_path: Path) -> None
         restore_backup(repo, tmp_path / "restored")
 
 
+@pytest.mark.parametrize("content", [b"[]", b"null", b"\xff"])
+def test_invalid_manifest_does_not_change_existing_state(tmp_path: Path, content: bytes) -> None:
+    source = tmp_path / "source"
+    repo = tmp_path / "repo"
+    restored = tmp_path / "restored"
+    state(source)
+    checkout(repo)
+    state(restored)
+    (restored / "tasks.md").write_text("# keep local work\n", encoding="utf-8")
+    perform_backup(source, repo, push=False)
+    (repo / "backup-manifest.json").write_bytes(content)
+
+    with pytest.raises(BackupError):
+        restore_backup(repo, restored)
+    assert (restored / "tasks.md").read_text(encoding="utf-8") == "# keep local work\n"
+
+
+def test_unexpected_checkout_state_cannot_be_committed(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    repo = tmp_path / "repo"
+    state(source)
+    checkout(repo)
+    perform_backup(source, repo, push=False)
+    (repo / "state" / "credentials.txt").write_text("private data", encoding="utf-8")
+    (source / "tasks.md").write_text("# changed\n", encoding="utf-8")
+
+    with pytest.raises(BackupError, match="unexpected"):
+        perform_backup(source, repo, push=False)
+
+
+def test_unchanged_run_recovers_a_failed_commit(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    repo = tmp_path / "repo"
+    state(source)
+    checkout(repo)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o700)
+    git(repo, "config", "core.hooksPath", str(hooks))
+
+    with pytest.raises(BackupError, match="git commit"):
+        perform_backup(source, repo, push=False)
+    hook.unlink()
+    assert perform_backup(source, repo, push=False).changed
+    restored = tmp_path / "restored"
+    restore_backup(repo, restored)
+    assert (restored / "tasks.md").read_bytes() == (source / "tasks.md").read_bytes()
+    assert not perform_backup(source, repo, push=False).changed
+
+
 def test_unchanged_run_retries_an_unpushed_commit(tmp_path: Path) -> None:
     source = tmp_path / "source"
     repo = tmp_path / "repo"
@@ -88,11 +146,8 @@ def test_unchanged_run_retries_an_unpushed_commit(tmp_path: Path) -> None:
     git(repo, "remote", "set-url", "origin", str(remote))
     result = perform_backup(source, repo, push=True)
     assert not result.changed
-    local_head = subprocess.check_output(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
-    ).strip()
-    remote_head = subprocess.check_output(
-        ["git", "--git-dir", str(remote), "rev-parse", "refs/heads/state-backup"],
-        text=True,
-    ).strip()
-    assert remote_head == local_head
+    fetched = tmp_path / "fetched"
+    git(tmp_path, "clone", "--branch", "state-backup", str(remote), str(fetched))
+    restored = tmp_path / "restored"
+    restore_backup(fetched, restored)
+    assert (restored / "tasks.md").read_text(encoding="utf-8") == "# changed\n"

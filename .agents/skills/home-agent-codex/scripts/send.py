@@ -15,33 +15,40 @@ def parse_args() -> argparse.Namespace:
 
 
 def ssh_host() -> str:
-    configured = os.environ.get("HOME_AGENT_SSH_HOST", "").strip()
-    if configured:
-        return configured
-    configured_path = os.environ.get("HOME_AGENT_SSH_HOST_FILE")
-    path = Path(configured_path) if configured_path else Path.home() / ".config/home-agent/ssh-host"
-    try:
-        host = path.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        raise ValueError(f"Home Agent SSH destination is not configured in {path}: {exc}") from exc
+    host = os.environ.get("HOME_AGENT_SSH_HOST", "").strip()
+    if not host:
+        configured_path = os.environ.get("HOME_AGENT_SSH_HOST_FILE")
+        path = (
+            Path(configured_path)
+            if configured_path
+            else Path.home() / ".config/home-agent/ssh-host"
+        )
+        try:
+            host = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ValueError(
+                f"Home Agent SSH destination is not configured in {path}: {exc}"
+            ) from exc
     if not host or any(character.isspace() for character in host) or host.startswith("-"):
-        raise ValueError(f"Home Agent SSH destination in {path} is invalid")
+        raise ValueError("Home Agent SSH destination is invalid")
     return host
 
 
 def main() -> int:
     args = parse_args()
-    message = " ".join(args.message).strip() if args.message else sys.stdin.read().strip()
+    message = " ".join(args.message) if args.message else sys.stdin.read()
     for prefix in (
         "@homeAgentCodex",
         "$home-agent-codex",
         "@strawberryCodex",
         "$strawberry-codex",
     ):
-        if message.lower().startswith(prefix.lower()):
+        if message.lower().startswith(prefix.lower()) and (
+            len(message) == len(prefix) or message[len(prefix)] in " :,-\n\r\t"
+        ):
             message = message[len(prefix) :].lstrip(" :,-\n")
             break
-    if not message:
+    if not message.strip():
         print("No message was provided for Home Agent Codex.", file=sys.stderr)
         return 2
 
@@ -60,16 +67,21 @@ def main() -> int:
         "ServerAliveInterval=30",
         "-o",
         "ServerAliveCountMax=4",
+        "--",
         host,
         "home-agent-codex-bridge",
     ]
-    result = subprocess.run(
-        command,
-        input=message + "\n",
-        text=True,
-        check=False,
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            input=message,
+            text=True,
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:
+        print(f"Could not start SSH: {exc}", file=sys.stderr)
+        return 1
     if result.returncode == 0:
         print(f"[HomeAgentCodex] {result.stdout.rstrip()}")
     else:
