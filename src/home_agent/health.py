@@ -43,7 +43,7 @@ class HealthSnapshot:
             keys.append(key)
         if self.failed_units:
             keys.extend(f"failed-unit:{unit}" for unit in self.failed_units)
-        payload = json.dumps(keys, sort_keys=True).encode()
+        payload = json.dumps(sorted(set(keys))).encode()
         return hashlib.sha256(payload).hexdigest()
 
 
@@ -163,28 +163,30 @@ def _read_durable(path: Path) -> str:
 
 
 def _has_instructions(content: str) -> bool:
-    in_comment = False
-    for raw_line in content.splitlines():
+    for raw_line in _without_comments(content).splitlines():
         line = raw_line.strip()
-        if line.startswith("<!--"):
-            in_comment = True
-        if not in_comment and line and not line.startswith("#"):
+        if line and not line.startswith("#"):
             return True
-        if line.endswith("-->"):
-            in_comment = False
     return False
+
+
+def _without_comments(content: str) -> str:
+    return re.sub(r"<!--.*?(?:-->|\Z)", "", content, flags=re.DOTALL)
 
 
 def _tasks_due(content: str, today: date | None = None) -> bool:
     current_date = today or datetime.now(timezone.utc).date()
-    for raw_line in content.splitlines():
+    for raw_line in _without_comments(content).splitlines():
         line = raw_line.strip()
         if not line.startswith("- [ ]"):
             continue
         marker = "due:"
         if marker not in line.lower():
             return True
-        due_value = line.lower().split(marker, 1)[1].strip().split()[0].rstrip(")]},;.")
+        due_words = line.lower().split(marker, 1)[1].strip().split()
+        if not due_words:
+            return True
+        due_value = due_words[0].rstrip(")]},;.")
         try:
             if date.fromisoformat(due_value) <= current_date:
                 return True
@@ -199,14 +201,20 @@ def _recent_duplicate(database: Database, snapshot: HealthSnapshot, repeat_secon
         return False
     if previous.get("fingerprint") != snapshot.fingerprint:
         return False
+    job_id = previous.get("job_id")
+    if not isinstance(job_id, int):
+        return False
+    job = database.get_job(job_id)
+    if job is None or job.status not in {"queued", "running", "completed"}:
+        return False
     timestamp = previous.get("enqueued_at")
     if not isinstance(timestamp, str):
         return False
     try:
         elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(timestamp)
-    except ValueError:
+    except (ValueError, TypeError):
         return False
-    return elapsed.total_seconds() < repeat_seconds
+    return 0 <= elapsed.total_seconds() < repeat_seconds
 
 
 def enqueue_heartbeat(settings: Settings, database: Database, *, force: bool = False) -> Job | None:
@@ -251,9 +259,13 @@ Investigate only what is needed, update durable state when appropriate, and repo
 actionable findings. If nothing needs the owner's attention, respond with exactly NOOP.
 """
     job = database.enqueue("heartbeat", prompt, deduplicate_kind=True)
-    if job is not None and snapshot.alerts and not duplicate_alert:
+    if job is not None and snapshot.alerts and (not duplicate_alert or force):
         database.set_metadata(
             "heartbeat_alert",
-            {"fingerprint": snapshot.fingerprint, "enqueued_at": snapshot.captured_at},
+            {
+                "fingerprint": snapshot.fingerprint,
+                "enqueued_at": datetime.now(timezone.utc).isoformat(),
+                "job_id": job.id,
+            },
         )
     return job

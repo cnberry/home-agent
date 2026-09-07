@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -56,14 +57,18 @@ class Settings:
     def heartbeat_file(self) -> Path:
         return self.durable_dir / "heartbeat.md"
 
-    def read_telegram_token(self) -> str:
+    @property
+    def telegram_credential_path(self) -> Path:
         credential_dir = os.environ.get("CREDENTIALS_DIRECTORY")
-        token_path = (
+        return (
             Path(credential_dir) / "telegram-token" if credential_dir else self.telegram_token_file
         )
+
+    def read_telegram_token(self) -> str:
+        token_path = self.telegram_credential_path
         try:
             token = token_path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise ConfigError(f"cannot read Telegram token file {token_path}: {exc}") from exc
         if not token or ":" not in token:
             raise ConfigError(f"Telegram token file {token_path} is empty or malformed")
@@ -80,9 +85,29 @@ def _table(data: dict[str, Any], name: str) -> dict[str, Any]:
 def _path(value: Any, default: Path, name: str) -> Path:
     if value is None:
         return default
-    if not isinstance(value, str) or not value.startswith("/"):
+    if not isinstance(value, str) or not value.startswith("/") or "\x00" in value:
         raise ConfigError(f"{name} must be an absolute path")
     return Path(value)
+
+
+def _integer(table: dict[str, Any], key: str, default: int, section: str) -> int:
+    value = table.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ConfigError(f"{section}.{key} must be an integer")
+    return value
+
+
+def _number(table: dict[str, Any], key: str, default: float, section: str) -> float:
+    value = table.get(key, default)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ConfigError(f"{section}.{key} must be a finite number")
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ConfigError(f"{section}.{key} must be a finite number") from exc
+    if not math.isfinite(number):
+        raise ConfigError(f"{section}.{key} must be a finite number")
+    return number
 
 
 def load_settings(path: Path | None = None) -> Settings:
@@ -91,7 +116,7 @@ def load_settings(path: Path | None = None) -> Settings:
     try:
         with config_path.open("rb") as handle:
             data = tomllib.load(handle)
-    except OSError as exc:
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"cannot read configuration {config_path}: {exc}") from exc
 
     telegram = _table(data, "telegram")
@@ -100,7 +125,7 @@ def load_settings(path: Path | None = None) -> Settings:
     backup = _table(data, "backup")
 
     owner_id = telegram.get("owner_id")
-    if not isinstance(owner_id, int) or owner_id <= 0:
+    if not isinstance(owner_id, int) or isinstance(owner_id, bool) or owner_id <= 0:
         raise ConfigError("telegram.owner_id must be a positive numeric Telegram user ID")
 
     defaults = Settings(telegram_owner_id=owner_id)
@@ -117,40 +142,55 @@ def load_settings(path: Path | None = None) -> Settings:
             telegram.get("token_file"), defaults.telegram_token_file, "telegram.token_file"
         ),
         backup_checkout=_path(backup.get("checkout"), defaults.backup_checkout, "backup.checkout"),
-        max_input_chars=int(agent.get("max_input_chars", defaults.max_input_chars)),
-        max_queue=int(agent.get("max_queue", defaults.max_queue)),
-        turn_timeout_seconds=int(agent.get("turn_timeout_seconds", defaults.turn_timeout_seconds)),
-        worker_poll_seconds=float(agent.get("worker_poll_seconds", defaults.worker_poll_seconds)),
-        model=cast(str, agent.get("model") or defaults.model),
-        reasoning_effort=cast(
-            str, agent.get("reasoning_effort") or defaults.reasoning_effort
+        max_input_chars=_integer(agent, "max_input_chars", defaults.max_input_chars, "agent"),
+        max_queue=_integer(agent, "max_queue", defaults.max_queue, "agent"),
+        turn_timeout_seconds=_integer(
+            agent, "turn_timeout_seconds", defaults.turn_timeout_seconds, "agent"
         ),
-        disk_warning_percent=float(
-            heartbeat.get("disk_warning_percent", defaults.disk_warning_percent)
+        worker_poll_seconds=_number(
+            agent, "worker_poll_seconds", defaults.worker_poll_seconds, "agent"
         ),
-        disk_critical_percent=float(
-            heartbeat.get("disk_critical_percent", defaults.disk_critical_percent)
+        model=agent.get("model", defaults.model),
+        reasoning_effort=agent.get("reasoning_effort", defaults.reasoning_effort),
+        disk_warning_percent=_number(
+            heartbeat, "disk_warning_percent", defaults.disk_warning_percent, "heartbeat"
         ),
-        memory_available_warning_percent=float(
-            heartbeat.get(
-                "memory_available_warning_percent", defaults.memory_available_warning_percent
-            )
+        disk_critical_percent=_number(
+            heartbeat, "disk_critical_percent", defaults.disk_critical_percent, "heartbeat"
         ),
-        load_per_cpu_warning=float(
-            heartbeat.get("load_per_cpu_warning", defaults.load_per_cpu_warning)
+        memory_available_warning_percent=_number(
+            heartbeat,
+            "memory_available_warning_percent",
+            defaults.memory_available_warning_percent,
+            "heartbeat",
         ),
-        cpu_temperature_warning_c=float(
-            heartbeat.get("cpu_temperature_warning_c", defaults.cpu_temperature_warning_c)
+        load_per_cpu_warning=_number(
+            heartbeat, "load_per_cpu_warning", defaults.load_per_cpu_warning, "heartbeat"
         ),
-        heartbeat_repeat_seconds=int(
-            heartbeat.get("repeat_alert_seconds", defaults.heartbeat_repeat_seconds)
+        cpu_temperature_warning_c=_number(
+            heartbeat, "cpu_temperature_warning_c", defaults.cpu_temperature_warning_c, "heartbeat"
+        ),
+        heartbeat_repeat_seconds=_integer(
+            heartbeat, "repeat_alert_seconds", defaults.heartbeat_repeat_seconds, "heartbeat"
         ),
     )
     if settings.max_queue < 1 or settings.max_input_chars < 1:
         raise ConfigError("agent queue and input limits must be positive")
     if settings.turn_timeout_seconds < 30:
         raise ConfigError("agent.turn_timeout_seconds must be at least 30")
-    if not isinstance(settings.model, str) or not settings.model:
+    if settings.worker_poll_seconds <= 0:
+        raise ConfigError("agent.worker_poll_seconds must be positive")
+    if not 0 <= settings.disk_warning_percent < settings.disk_critical_percent <= 100:
+        raise ConfigError("heartbeat disk thresholds must satisfy 0 <= warning < critical <= 100")
+    if not 0 <= settings.memory_available_warning_percent <= 100:
+        raise ConfigError("heartbeat.memory_available_warning_percent must be between 0 and 100")
+    if (
+        settings.load_per_cpu_warning <= 0
+        or settings.cpu_temperature_warning_c <= 0
+        or settings.heartbeat_repeat_seconds <= 0
+    ):
+        raise ConfigError("heartbeat load, temperature, and repeat thresholds must be positive")
+    if not isinstance(settings.model, str) or not settings.model.strip():
         raise ConfigError("agent.model must be a non-empty string")
     if (
         not isinstance(settings.reasoning_effort, str)

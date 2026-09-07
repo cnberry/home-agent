@@ -93,25 +93,25 @@ def authenticate(args: argparse.Namespace) -> int:
 
 
 async def discover_telegram_id_async(settings: Settings) -> int:
-    bot = Bot(settings.read_telegram_token())
     print("Send a private message to the bot within 60 seconds…")
     deadline = asyncio.get_running_loop().time() + 60
     offset: int | None = None
-    while asyncio.get_running_loop().time() < deadline:
-        updates = await bot.get_updates(offset=offset, timeout=10, allowed_updates=["message"])
-        for update in updates:
-            offset = update.update_id + 1
-            if update.effective_user and update.effective_chat:
-                print(
-                    json.dumps(
-                        {
-                            "user_id": update.effective_user.id,
-                            "chat_id": update.effective_chat.id,
-                            "chat_type": update.effective_chat.type,
-                        }
+    async with Bot(settings.read_telegram_token()) as bot:
+        while asyncio.get_running_loop().time() < deadline:
+            updates = await bot.get_updates(offset=offset, timeout=10, allowed_updates=["message"])
+            for update in updates:
+                offset = update.update_id + 1
+                if update.effective_user and update.effective_chat:
+                    print(
+                        json.dumps(
+                            {
+                                "user_id": update.effective_user.id,
+                                "chat_id": update.effective_chat.id,
+                                "chat_type": update.effective_chat.type,
+                            }
+                        )
                     )
-                )
-                return 0
+                    return 0
     print("No Telegram message received.", file=sys.stderr)
     return 1
 
@@ -128,7 +128,6 @@ async def doctor_async(
     checks: list[Check] = []
     checks.append(Check("workspace", settings.workspace.is_dir(), str(settings.workspace)))
     for name, path in (
-        ("database_parent", settings.database_path.parent),
         ("durable_dir", settings.durable_dir),
         ("codex_home", settings.codex_home),
     ):
@@ -138,7 +137,7 @@ async def doctor_async(
         database.initialize()
         checks.append(Check("database", True, str(settings.database_path)))
     except Exception as exc:
-        checks.append(Check("database", False, str(exc)))
+        checks.append(Check("database", False, safe_error(exc)))
 
     token: str | None = None
     if offline or skip_telegram:
@@ -146,20 +145,15 @@ async def doctor_async(
     else:
         try:
             token = settings.read_telegram_token()
-            token_path = settings.telegram_token_file
-            if token_path.exists():
-                mode = stat.S_IMODE(token_path.stat().st_mode)
-                checks.append(Check("telegram_token_mode", mode & 0o077 == 0, oct(mode)))
-            else:
-                checks.append(Check("telegram_token", True, "loaded from systemd credentials"))
-        except ConfigError as exc:
-            checks.append(Check("telegram_token", False, str(exc)))
+            mode = stat.S_IMODE(settings.telegram_credential_path.stat().st_mode)
+            checks.append(Check("telegram_token_mode", mode & 0o077 == 0, oct(mode)))
+        except (ConfigError, OSError) as exc:
+            checks.append(Check("telegram_token", False, safe_error(exc)))
 
     if token:
         try:
-            bot = Bot(token)
-            identity = await bot.get_me()
-            checks.append(Check("telegram_api", True, f"@{identity.username}"))
+            async with Bot(token) as bot:
+                checks.append(Check("telegram_api", True, f"@{bot.username}"))
         except Exception as exc:
             checks.append(Check("telegram_api", False, safe_error(exc)))
 
@@ -176,7 +170,7 @@ async def doctor_async(
             detail = "authenticated" if authenticated else "missing"
             checks.append(Check("codex_auth", authenticated, detail))
         except Exception as exc:
-            checks.append(Check("codex_auth", False, str(exc)))
+            checks.append(Check("codex_auth", False, safe_error(exc)))
         finally:
             await runtime.close()
     return checks
@@ -306,6 +300,6 @@ def main() -> None:
     try:
         code = args.func(args)
     except (ConfigError, BackupError) as exc:
-        LOGGER.error("%s", exc)
+        LOGGER.error("%s", safe_error(exc))
         code = 2
     raise SystemExit(code)

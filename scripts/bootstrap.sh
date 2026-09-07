@@ -91,8 +91,8 @@ fi
 if ! id "$backup_user" >/dev/null 2>&1; then
   useradd --system --home-dir "$backup_root" --shell "$nologin_shell" --user-group "$backup_user"
 fi
-usermod --home "$data_root" --shell "$nologin_shell" -G "$state_group" "$agent_user"
-usermod --home "$backup_root" --shell "$nologin_shell" -G "$state_group" "$backup_user"
+usermod --home "$data_root" --shell "$nologin_shell" --append -G "$state_group" "$agent_user"
+usermod --home "$backup_root" --shell "$nologin_shell" --append -G "$state_group" "$backup_user"
 
 install -d -o root -g root -m 0755 "$install_root/releases" "$project_root"
 install -d -o "$agent_user" -g "$agent_user" -m 0700 "$data_root/runtime" "$data_root/codex-home"
@@ -108,7 +108,7 @@ else
   version="source-$(date -u +%Y%m%d%H%M%S)"
 fi
 release_dir="$install_root/releases/$version"
-if [[ ! -d "$release_dir" ]]; then
+if [[ ! -f "$release_dir/.build-complete" ]]; then
   install -d -o root -g root -m 0755 "$release_dir"
   if git -C "$source_root" rev-parse --verify HEAD >/dev/null 2>&1; then
     git -C "$source_root" archive HEAD | tar -x -C "$release_dir"
@@ -123,9 +123,8 @@ if [[ ! -d "$release_dir" ]]; then
   "$release_dir/venv/bin/python" -m pip install --disable-pip-version-check \
     --no-build-isolation --no-deps "$release_dir"
   "$release_dir/venv/bin/python" -c 'import home_agent'
+  touch "$release_dir/.build-complete"
 fi
-ln -sfn "$release_dir" "$install_root/current.new"
-mv -Tf "$install_root/current.new" "$install_root/current"
 install -o root -g root -m 0755 "$source_root/scripts/home-agent-codex.sh" \
   /usr/local/bin/home-agent-codex
 install -o root -g root -m 0755 "$source_root/scripts/home-agent-codex-bridge.sh" \
@@ -183,7 +182,7 @@ done
 systemctl daemon-reload
 
 HOME_AGENT_CONFIG="$config_file" TELEGRAM_TOKEN_PATH="$token_file" \
-  "$install_root/current/venv/bin/python" - <<'PY'
+  "$release_dir/venv/bin/python" - <<'PY'
 import asyncio
 import os
 from pathlib import Path
@@ -199,13 +198,19 @@ PY
 
 runuser -u "$agent_user" -- env \
   CODEX_HOME="$data_root/codex-home" \
-  "$install_root/current/venv/bin/agentctl" --config "$config_file" init-db
+  "$release_dir/venv/bin/agentctl" --config "$config_file" init-db
 
 if [[ "$skip_auth" == false && "$non_interactive" == false ]]; then
   runuser -u "$agent_user" -- env \
     CODEX_HOME="$data_root/codex-home" \
-    "$install_root/current/venv/bin/agentctl" --config "$config_file" auth
+    "$release_dir/venv/bin/agentctl" --config "$config_file" auth
 fi
+
+runuser -u "$agent_user" -- \
+  "$release_dir/venv/bin/agentctl" --config "$config_file" doctor --skip-telegram
+
+ln -sfn "$release_dir" "$install_root/current.new"
+mv -Tf "$install_root/current.new" "$install_root/current"
 
 if [[ -L "$data_root/.ssh" ]]; then
   echo "$data_root/.ssh must not be a symlink" >&2
@@ -228,10 +233,9 @@ if [[ "$non_interactive" == false && "$backup_configured" == true ]]; then
   esac
 fi
 
-runuser -u "$agent_user" -- \
-  "$install_root/current/venv/bin/agentctl" --config "$config_file" doctor --skip-telegram
-
-systemctl enable --now home-agent.service home-agent-heartbeat.timer
+systemctl enable home-agent.service home-agent-heartbeat.timer
+systemctl restart home-agent.service
+systemctl start home-agent-heartbeat.timer
 if [[ "$backup_configured" == true && -d "$backup_root/repo/.git" ]]; then
   systemctl enable --now home-agent-state-backup.timer
 else

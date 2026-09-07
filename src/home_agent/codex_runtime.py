@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from openai_codex import ApprovalMode, AsyncCodex, AsyncTurnHandle, CodexConfig, Sandbox
+from openai_codex.errors import ServerBusyError, TransportClosedError
 from openai_codex.types import ReasoningEffort, TurnStatus
 
 LOGGER = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ Use root only when needed and verify concrete work before reporting success.
 
 
 def is_transient_error(error: BaseException) -> bool:
-    if isinstance(error, (ConnectionError, TimeoutError)):
+    if isinstance(error, (ConnectionError, TimeoutError, ServerBusyError, TransportClosedError)):
         return True
     message = str(error).lower()
     return any(marker in message for marker in TRANSIENT_ERROR_MARKERS)
@@ -92,7 +93,8 @@ class CodexRuntime:
             )
         )
         self._active_handle: AsyncTurnHandle | None = None
-        self._active_lock = asyncio.Lock()
+        self._running = False
+        self._interrupt_requested = False
 
     async def close(self) -> None:
         await self._codex.close()
@@ -116,97 +118,92 @@ class CodexRuntime:
         on_thread: Callable[[str], None],
         on_turn_started: Callable[[], None],
     ) -> CodexResult:
+        turn_started = False
+
+        def before_dispatch() -> None:
+            nonlocal turn_started
+            # A lost dispatch response does not prove that the server rejected
+            # work. Persist the no-replay boundary before sending the turn.
+            on_turn_started()
+            turn_started = True
+
+        self._running = True
+        self._interrupt_requested = False
+        try:
+            return await asyncio.wait_for(
+                self._run(prompt, thread_id, on_thread, before_dispatch),
+                timeout=self.timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            await self._interrupt_after_failure()
+            raise CodexInterrupted(
+                f"Codex turn exceeded {self.timeout_seconds} seconds",
+                turn_started=turn_started,
+            ) from exc
+        except asyncio.CancelledError:
+            await self._interrupt_after_failure()
+            raise
+        except CodexRunError:
+            raise
+        except Exception as exc:
+            await self._interrupt_after_failure()
+            raise CodexRunError(
+                str(exc),
+                turn_started=turn_started,
+                transient=not turn_started and is_transient_error(exc),
+            ) from exc
+        finally:
+            self._active_handle = None
+            self._running = False
+
+    async def _run(
+        self,
+        prompt: str,
+        thread_id: str | None,
+        on_thread: Callable[[str], None],
+        before_dispatch: Callable[[], None],
+    ) -> CodexResult:
         if not await self.authenticated(refresh=True):
             raise CodexRunError(
                 "Codex is not authenticated; run agentctl auth on the Home Agent host",
                 turn_started=False,
                 authentication=True,
             )
-
-        thread = None
         if thread_id:
-            try:
-                thread = await self._codex.thread_resume(
-                    thread_id,
-                    approval_mode=ApprovalMode.deny_all,
-                    cwd=str(self.workspace),
-                    developer_instructions=DEVELOPER_INSTRUCTIONS,
-                    model=self.model,
-                    sandbox=Sandbox.full_access,
-                )
-            except Exception:
-                LOGGER.warning("stored Codex thread could not be resumed; starting a new thread")
-        if thread is None:
-            try:
-                thread = await self._codex.thread_start(
-                    approval_mode=ApprovalMode.deny_all,
-                    cwd=str(self.workspace),
-                    developer_instructions=DEVELOPER_INSTRUCTIONS,
-                    model=self.model,
-                    sandbox=Sandbox.full_access,
-                    service_name="home-agent",
-                )
-            except Exception as exc:
-                raise CodexRunError(
-                    str(exc),
-                    turn_started=False,
-                    transient=is_transient_error(exc),
-                ) from exc
-
-        on_thread(thread.id)
-        try:
-            handle = await thread.turn(
-                prompt,
+            thread = await self._codex.thread_resume(
+                thread_id,
                 approval_mode=ApprovalMode.deny_all,
                 cwd=str(self.workspace),
-                effort=self.reasoning_effort,
+                developer_instructions=DEVELOPER_INSTRUCTIONS,
                 model=self.model,
                 sandbox=Sandbox.full_access,
             )
-        except Exception as exc:
-            raise CodexRunError(
-                str(exc),
-                turn_started=False,
-                transient=is_transient_error(exc),
-            ) from exc
+        else:
+            thread = await self._codex.thread_start(
+                approval_mode=ApprovalMode.deny_all,
+                cwd=str(self.workspace),
+                developer_instructions=DEVELOPER_INSTRUCTIONS,
+                model=self.model,
+                sandbox=Sandbox.full_access,
+                service_name="home-agent",
+            )
 
-        async with self._active_lock:
-            self._active_handle = handle
-
-        try:
-            on_turn_started()
-        except Exception as exc:
+        on_thread(thread.id)
+        if self._interrupt_requested:
+            raise CodexInterrupted("Codex turn was interrupted", turn_started=False)
+        before_dispatch()
+        handle = await thread.turn(
+            prompt,
+            approval_mode=ApprovalMode.deny_all,
+            cwd=str(self.workspace),
+            effort=self.reasoning_effort,
+            model=self.model,
+            sandbox=Sandbox.full_access,
+        )
+        self._active_handle = handle
+        if self._interrupt_requested:
             await handle.interrupt()
-            async with self._active_lock:
-                if self._active_handle is handle:
-                    self._active_handle = None
-            if isinstance(exc, CodexRunError):
-                raise
-            raise CodexRunError(str(exc), turn_started=True) from exc
-
-        run_task = asyncio.create_task(handle.run())
-        try:
-            result = await asyncio.wait_for(asyncio.shield(run_task), self.timeout_seconds)
-        except TimeoutError as exc:
-            await handle.interrupt()
-            run_task.cancel()
-            await asyncio.gather(run_task, return_exceptions=True)
-            raise CodexInterrupted(
-                f"Codex turn exceeded {self.timeout_seconds} seconds",
-                turn_started=True,
-            ) from exc
-        except asyncio.CancelledError:
-            await handle.interrupt()
-            run_task.cancel()
-            await asyncio.gather(run_task, return_exceptions=True)
-            raise
-        except Exception as exc:
-            raise CodexRunError(str(exc), turn_started=True) from exc
-        finally:
-            async with self._active_lock:
-                if self._active_handle is handle:
-                    self._active_handle = None
-
+        result = await handle.run()
         if result.status == TurnStatus.interrupted:
             raise CodexInterrupted("Codex turn was interrupted", turn_started=True)
         if result.status != TurnStatus.completed:
@@ -218,12 +215,19 @@ class CodexRuntime:
         return CodexResult(thread_id=thread.id, response=response)
 
     async def interrupt(self) -> bool:
-        async with self._active_lock:
-            handle = self._active_handle
-        if handle is None:
+        if not self._running:
             return False
-        await handle.interrupt()
+        self._interrupt_requested = True
+        if self._active_handle is not None:
+            await asyncio.wait_for(self._active_handle.interrupt(), timeout=5)
         return True
+
+    async def _interrupt_after_failure(self) -> None:
+        if self._active_handle is not None:
+            try:
+                await asyncio.wait_for(self._active_handle.interrupt(), timeout=5)
+            except Exception:
+                LOGGER.warning("could not confirm interruption of the failed Codex turn")
 
     async def archive(self, thread_id: str) -> None:
         await self._codex.thread_archive(thread_id)

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
-from home_agent.config import Settings
+if TYPE_CHECKING:
+    from home_agent.config import Settings
 
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
+    from home_agent.config import Settings
+
     workspace = tmp_path / "workspace"
     data = tmp_path / "data"
     durable = data / "durable"

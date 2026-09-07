@@ -19,7 +19,7 @@ from home_agent.codex_runtime import CodexRuntime
 from home_agent.config import Settings
 from home_agent.database import Database, Job, QueueFullError
 from home_agent.health import enqueue_heartbeat
-from home_agent.worker import Worker, safe_error
+from home_agent.worker import AgentRuntime, Worker, safe_error
 
 LOGGER = logging.getLogger(__name__)
 TELEGRAM_CHUNK = 3_900
@@ -86,11 +86,18 @@ class TelegramNotifier:
 
 
 class TelegramGateway:
-    def __init__(self, settings: Settings, token: str) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        token: str,
+        *,
+        application: Application[Any, Any, Any, Any, Any, Any] | None = None,
+        codex: AgentRuntime | None = None,
+    ) -> None:
         self.settings = settings
         self.database = Database(settings.database_path, settings.max_queue)
         self.database.initialize()
-        self.codex = CodexRuntime(
+        self.codex: AgentRuntime = codex or CodexRuntime(
             settings.workspace,
             settings.codex_home,
             timeout_seconds=settings.turn_timeout_seconds,
@@ -98,7 +105,7 @@ class TelegramGateway:
             reasoning_effort=settings.reasoning_effort,
         )
         self.application: Application[Any, Any, Any, Any, Any, Any] = (
-            ApplicationBuilder().token(token).concurrent_updates(8).build()
+            application or ApplicationBuilder().token(token).build()
         )
         self.notifier = TelegramNotifier(self.application.bot, settings.telegram_owner_id)
         self.worker = Worker(
@@ -110,6 +117,7 @@ class TelegramGateway:
         self.worker_task: asyncio.Task[None] | None = None
         self._register_handlers()
         self.application.post_init = self._post_init
+        self.application.post_stop = self._post_stop
         self.application.post_shutdown = self._post_shutdown
 
     def _register_handlers(self) -> None:
@@ -134,6 +142,7 @@ class TelegramGateway:
             user
             and chat
             and message
+            and update.message is not None
             and not user.is_bot
             and user.id == self.settings.telegram_owner_id
             and chat.type == Chat.PRIVATE
@@ -158,11 +167,19 @@ class TelegramGateway:
             except Exception as exc:
                 LOGGER.warning("restart notification failed: %s", safe_error(exc))
         self.worker_task = asyncio.create_task(self.worker.run(), name="home-agent-worker")
+        self.worker_task.add_done_callback(self._worker_done)
 
-    async def _post_shutdown(self, _: Application[Any, Any, Any, Any, Any, Any]) -> None:
+    def _worker_done(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            LOGGER.error("Home Agent worker stopped: %s", safe_error(error))
+            self.application.stop_running()
+
+    async def _post_stop(self, _: Application[Any, Any, Any, Any, Any, Any]) -> None:
         await self.worker.stop()
         if self.worker_task:
             await asyncio.gather(self.worker_task, return_exceptions=True)
+
+    async def _post_shutdown(self, _: Application[Any, Any, Any, Any, Any, Any]) -> None:
         await self.codex.close()
 
     async def help_command(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -183,11 +200,7 @@ class TelegramGateway:
         )
 
     async def text_message(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-        if (
-            not self.authorized(update)
-            or not self.first_seen(update)
-            or not update.effective_message
-        ):
+        if not self.authorized(update) or not update.effective_message:
             return
         text = update.effective_message.text or ""
         if len(text) > self.settings.max_input_chars:
