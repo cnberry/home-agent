@@ -118,6 +118,30 @@ async def run_job(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("authentication_degraded", [False, True])
+async def test_idle_worker_accepts_new_work(
+    tmp_path: Path, authentication_degraded: bool
+) -> None:
+    database = queue(tmp_path)
+    database.set_metadata("authentication_degraded", authentication_degraded)
+    notifications = Notifications()
+    worker = Worker(database, Runtime(), notifications, poll_seconds=0.001)
+    task = asyncio.create_task(worker.run())
+    try:
+        # Let the polling wait expire before new work becomes available.
+        await asyncio.sleep(0.01)
+        database.set_metadata("authentication_degraded", False)
+        job = database.enqueue("telegram", "new work", telegram_chat_id=123)
+        assert job is not None
+        stored = await wait_for_status(database, job.id, "completed")
+        assert stored.response == "done"
+        assert notifications.events == [("completed", job.id, "done")]
+    finally:
+        await worker.stop()
+        await asyncio.wait_for(task, 2)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "chat_id", "response", "notify"),
     [

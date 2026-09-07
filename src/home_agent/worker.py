@@ -80,7 +80,7 @@ class Worker:
     async def run(self) -> None:
         while not self._stop.is_set():
             if self.database.get_metadata("authentication_degraded") is True:
-                with suppress(TimeoutError):
+                with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(self._stop.wait(), timeout=self.poll_seconds)
                 continue
             async with self._thread_lock:
@@ -90,7 +90,7 @@ class Worker:
                 if job is not None:
                     await self._process(job)
             if job is None:
-                with suppress(TimeoutError):
+                with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(self._stop.wait(), timeout=self.poll_seconds)
                 continue
 
