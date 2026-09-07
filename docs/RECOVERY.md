@@ -40,7 +40,8 @@ that deployment data belongs in this repository.
 2. Clone the Home Agent source repository.
 3. Check out the reviewed release tag or commit.
 4. Run `sudo ./scripts/bootstrap.sh`.
-5. Enter the Telegram token locally and complete device-code authentication.
+5. Enter the Telegram token locally and complete device-code authentication. See the
+   [Telegram setup guide](../README.md#telegram-bot-setup) for bot creation and owner ID discovery.
 6. Restore the private deployment repository and install its backup repository URL at
    `/etc/home-agent/backup-repository`.
 7. Run `sudo ./scripts/configure-backup.sh`, add the newly printed public key as a write-enabled
@@ -74,11 +75,49 @@ sudo -u home-agent sudo -n id -u  # must print 0
 sudo visudo -cf /etc/sudoers.d/home-agent
 ```
 
-From Telegram, verify `/status`, send two rapid harmless messages, interrupt a harmless long turn
-with `/stop`, and force `/heartbeat`. Confirm another account and a group produce no response.
+Complete the Telegram checklist below after these host checks.
 
 Run any machine-specific acceptance checks defined by the private deployment repository. Do not
 send live device actions as part of an unattended migration check.
+
+## Telegram end-to-end checklist
+
+Status: **pending the first live deployment walkthrough**. Automated tests and CI do not count
+as completion. Run these checks together on the dedicated agent host, using harmless prompts
+only. Record the release commit, host, date, and pass/fail or not-run result for each check in
+the private deployment repository; do not include tokens or raw credential-bearing logs.
+
+1. Confirm that only the new host is polling the bot and that all setup helpers have exited.
+   From the intended owner's private chat, send `/start` and `/status`. Expect help and healthy
+   authentication status. A transport reply alone does not prove Codex can execute a turn.
+2. Send `Reply exactly HOME-AGENT-OK. Do not use tools or modify files.` Expect acknowledgement
+   and a completed Codex reply containing `HOME-AGENT-OK`.
+3. Send `Run sleep 30, then reply WAIT-DONE. Do not modify any files.` While it is working,
+   send `Reply SECOND-OK without using tools.` Confirm it queues behind the first job and
+   `/status` never reports more than one active job. Let both finish in order.
+4. Repeat the harmless waiting task and queue another harmless reply. While work is outstanding,
+   `/new` should refuse. Send `/stop`; the active job should terminate without automatically
+   replaying, while the queued reply remains eligible to run. Stop does not clear the queue.
+5. Once the queue is empty, send `/new`, then another harmless reply request. Expect a new
+   Telegram conversation and a successful reply.
+6. Send `/heartbeat` and check `/status` for progress and completion. A successful `NOOP`
+   intentionally has no completion notification; silence alone is not evidence of failure.
+   Ensure durable heartbeat instructions contain no device-changing actions before this check.
+7. From another Telegram account, send harmless text and `/status`. Expect no response and no
+   additional queued job when the owner checks `/status`.
+8. From the owner account, forward harmless text from another chat; expect it to be ignored.
+   Edit an already completed harmless request; expect no second job for the edit.
+9. Confirm BotFather refuses adding the bot to groups when group joining is disabled. To test
+   the application's group rejection too, temporarily allow joins, add it to a controlled test
+   group, and send `/status` addressed to the bot. Expect no reply or queued job, then remove
+   the bot and disable group joining again. Record this check as not run if no test group is used.
+10. With no active work, run `sudo systemctl restart home-agent.service`. Confirm `/status` and
+    another harmless Codex request work without re-entering credentials. Keep crash/active-job
+    recovery as a separate supervised fault-injection check, not an ordinary restart assumption.
+
+If a check fails, stop before sending real host-control tasks. Inspect service status and the
+local journal, but review and redact any diagnostic output before sharing it. Do not add sleep
+delays or weaken automated assertions simply to make a failed live check look successful.
 
 ## Restore service coordination
 

@@ -32,10 +32,143 @@ SDK, and brings the answer back. That's pretty much the trick.
 The application never stores API credentials in the repository. The Telegram token is loaded
 as a systemd credential, and ChatGPT authentication stays in a mode-0700 Codex home.
 
+## Telegram bot setup
+
+Complete this before installing Home Agent on its dedicated Linux host. The configured owner
+can ask the agent to use root access, so use your own secured Telegram account and a dedicated
+bot, not a shared bot or group. Keep deployment-specific values out of this public repository.
+
+### 1. Create the bot and store its credentials
+
+1. Open the official [@BotFather](https://t.me/BotFather) in Telegram.
+2. Send `/newbot` and follow the prompts for a display name and a unique bot username.
+3. Create a 1Password item for this deployment. Store the bot token in a concealed password
+   field and record the bot username alongside it. Add your numeric owner ID after the next step.
+4. In BotFather, use `/setjoingroups` to disable adding this bot to groups. Leave inline mode off;
+   Home Agent only supports private direct messages.
+5. Open your new bot's private chat from the Telegram account that will control Home Agent and
+   press **Start**. No reply is expected until Home Agent is installed and running.
+
+Treat the token as a password. Do not put it in shell commands, browser URLs, source files,
+screenshots, issues, or chat with an assistant. If exposed, replace it through BotFather and
+update both 1Password and the host credential. Telegram's
+[official creation guide](https://core.telegram.org/bots/tutorial#obtain-your-bot-token)
+explains the BotFather flow; [bot settings](https://core.telegram.org/bots/features#edit-settings)
+are documented separately.
+
+### 2. Find your numeric owner ID through your own bot
+
+Home Agent needs your Telegram **user ID**, not your username, phone number, bot ID, or the
+number before the colon in the bot token. Do not substitute the example ID from the config.
+
+Run the following in an interactive Linux terminal with `python3` available, either on your
+administrator workstation or on the future agent host. It uses Python's standard library,
+prompts for the token without echoing it, and prints a one-time message to send to your bot.
+It does not install or start Home Agent.
+
+Use this only for initial setup of your dedicated bot: it consumes setup updates. No other
+program may poll the same bot while it runs. For an existing bot, stop its old service first
+and resolve pending work before using this procedure. A configured webhook must also be
+removed intentionally before switching to polling; this procedure refuses to remove it for you.
+
+```bash
+python3 - <<'PY'
+import getpass
+import json
+import secrets
+import time
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
+
+token = getpass.getpass("Telegram bot token from 1Password: ").strip()
+if ":" not in token:
+    raise SystemExit("The token is empty or malformed.")
+
+def api(method, **parameters):
+    url = "https://api.telegram.org/bot" + token + "/" + method
+    try:
+        with urlopen(url, data=urlencode(parameters).encode(), timeout=35) as response:
+            payload = json.load(response)
+    except HTTPError as error:
+        raise SystemExit(
+            f"Telegram HTTP {error.code}; check the token, webhook, and other polling processes."
+        ) from None
+    except (URLError, TimeoutError, ValueError):
+        raise SystemExit("Telegram request failed; check outbound HTTPS and try again.") from None
+    if not payload.get("ok"):
+        raise SystemExit("Telegram rejected the request; no credentials were printed.")
+    return payload["result"]
+
+identity = api("getMe")
+print("Bot: @" + identity["username"])
+if api("getWebhookInfo")["url"]:
+    raise SystemExit("This bot has a webhook. Resolve its existing deployment before continuing.")
+
+challenge = "home-agent-setup-" + secrets.token_hex(6)
+print("From your intended owner account, send this exact text in that bot's private chat:")
+print(challenge)
+deadline = time.monotonic() + 180
+offset = 0
+while time.monotonic() < deadline:
+    updates = api("getUpdates", offset=offset, timeout=30, allowed_updates='["message"]')
+    for update in updates:
+        offset = update["update_id"] + 1
+        message = update.get("message", {})
+        sender = message.get("from", {})
+        if (message.get("chat", {}).get("type") == "private"
+                and message.get("text") == challenge and not sender.get("is_bot", True)):
+            # Acknowledge the setup message so it cannot become a task after installation.
+            api("getUpdates", offset=offset, timeout=0, allowed_updates='["message"]')
+            print(json.dumps({"owner_id": sender["id"], "username": sender.get("username")}))
+            raise SystemExit(0)
+raise SystemExit("No matching private message received. Check the bot/account and rerun.")
+PY
+```
+
+Confirm the printed bot username and the account you used, then record `owner_id` in 1Password.
+Only send the setup message while this helper runs; do not send real tasks until installation
+finishes. The helper uses Telegram's documented
+[long-polling and acknowledgement API](https://core.telegram.org/bots/api#getupdates).
+
+The installed `agentctl telegram-id` command is a separate administrative helper that needs an
+existing config and token. It reports the next sender, so it is not a substitute for the
+one-time-message identity check above and must not compete with a running gateway.
+
+### 3. Supply the values during installation
+
+Follow **Clean installation** below on the actual Home Agent host, not automatically on your
+administrator workstation. When bootstrap prompts, enter the numeric owner ID and paste the
+token from 1Password into its hidden prompt. Complete the prompted Codex device login locally.
+
+Bootstrap writes the owner ID to `/etc/home-agent/config.toml` and stores the token in the
+root-owned, mode `0600` file `/etc/home-agent/credentials/telegram-token`. The service receives
+the token through systemd credentials; do not loosen the file permissions to let the agent
+read it directly. An existing configuration is preserved, so rerunning bootstrap is not a way
+to change its owner ID.
+
+Only one host should poll this bot. Keep the old deployment stopped when bringing up a
+replacement host. No webhook, public URL, port forwarding, or inbound firewall opening is needed.
+
+After installation, send `/start` or `/help`, then `/status`, from the owner's private chat.
+Continue with the [live Telegram acceptance checklist](docs/RECOVERY.md#telegram-end-to-end-checklist).
+That checklist is pending deployment; writing these instructions does not validate a live bot.
+
+### Troubleshooting the first connection
+
+- `401` or token validation failure: check the token in 1Password, the intended bot, and whether
+  BotFather has replaced its token. Never paste the failing token into logs or an issue.
+- `409` or conflicting polling/webhook errors: stop the old host and all ID-discovery helpers;
+  confirm no webhook-based deployment still owns this bot.
+- No private reply: press **Start**, confirm the configured numeric owner ID belongs to the
+  account you are messaging from, and check `sudo systemctl status home-agent.service`.
+- `/status` replies but tasks do not run: investigate Codex authentication with the
+  [operations guide](docs/OPERATIONS.md); Telegram setup and Codex login are separate concerns.
+
 ## Clean installation
 
-Prerequisites are an Ubuntu/Debian or Arch/Omarchy system with systemd and outbound HTTPS, a
-Telegram bot token, and the owner's numeric Telegram user ID.
+Prerequisites are an Ubuntu/Debian or Arch/Omarchy system with systemd and outbound HTTPS, plus
+the bot token and numeric owner ID obtained in [Telegram bot setup](#telegram-bot-setup).
 
 ```bash
 git clone https://github.com/cnberry/home-agent.git
