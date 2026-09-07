@@ -1,0 +1,32 @@
+[Unit]
+Description=Enqueue Home Agent heartbeat
+After=home-agent.service
+
+[Service]
+Type=oneshot
+User=home-agent
+Group=home-agent
+WorkingDirectory=/srv/home-agent/workspace
+Environment=CODEX_HOME=/var/lib/home-agent/codex-home
+Environment=HOME_AGENT_CONFIG=/etc/home-agent/config.toml
+ExecStart=/opt/home-agent/current/venv/bin/agentctl heartbeat
+UMask=0027
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native

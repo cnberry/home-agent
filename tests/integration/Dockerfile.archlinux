@@ -1,0 +1,13 @@
+FROM archlinux:base
+
+RUN pacman -Syu --noconfirm --needed ca-certificates python python-pip \
+    && pacman -Scc --noconfirm
+
+WORKDIR /src
+COPY requirements.lock pyproject.toml README.md LICENSE ./
+COPY src ./src
+RUN python3 -m venv /opt/test-venv \
+    && /opt/test-venv/bin/python -m pip install --require-hashes -r requirements.lock \
+    && /opt/test-venv/bin/python -m pip install --no-build-isolation --no-deps . \
+    && /opt/test-venv/bin/python -c "import home_agent" \
+    && /opt/test-venv/bin/agentctl --help

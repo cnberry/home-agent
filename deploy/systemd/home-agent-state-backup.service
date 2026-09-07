@@ -1,0 +1,38 @@
+[Unit]
+Description=Back up Home Agent durable state to GitHub
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=home-agent-backup
+Group=home-agent-backup
+SupplementaryGroups=home-agent-state
+WorkingDirectory=/var/lib/home-agent-backup
+Environment=HOME=/var/lib/home-agent-backup
+Environment=HOME_AGENT_CONFIG=/etc/home-agent/config.toml
+ExecStart=/opt/home-agent/current/venv/bin/agentctl backup
+UMask=0077
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/home-agent/durable
+ReadWritePaths=/var/lib/home-agent-backup
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native

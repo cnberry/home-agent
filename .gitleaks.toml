@@ -1,0 +1,9 @@
+title = "Home Agent secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Token-shaped redaction test fixture"
+regexTarget = "match"
+regexes = ['''123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij''']

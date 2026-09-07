@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools==84.0.0", "wheel==0.48.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "home-agent"
+version = "0.3.0"
+description = "Persistent Telegram interface for a local Codex agent"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Christopher Berry" }]
+dependencies = [
+  "exceptiongroup==1.3.1",
+  "openai-codex==0.144.4",
+  "python-telegram-bot==22.8",
+  "tomli==2.2.1",
+]
+
+[project.scripts]
+home-agent = "home_agent.cli:main"
+agentctl = "home_agent.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "backports-asyncio-runner==1.2.0; python_version < '3.11'",
+  "mypy==1.18.2",
+  "pip-audit==2.9.0",
+  "pytest==8.4.2",
+  "pytest-asyncio==1.2.0",
+  "ruff==0.13.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+packages = ["home_agent"]
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["telegram.*"]
+ignore_missing_imports = true

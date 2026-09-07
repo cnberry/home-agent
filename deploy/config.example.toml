@@ -1,0 +1,30 @@
+[telegram]
+# Exact numeric Telegram user ID allowed to control the bot.
+owner_id = 123456789
+token_file = "/etc/home-agent/credentials/telegram-token"
+
+[agent]
+workspace = "/srv/home-agent/workspace"
+data_dir = "/var/lib/home-agent"
+database_path = "/var/lib/home-agent/runtime/runtime.sqlite3"
+durable_dir = "/var/lib/home-agent/durable"
+codex_home = "/var/lib/home-agent/codex-home"
+max_input_chars = 12000
+max_queue = 20
+turn_timeout_seconds = 2700
+worker_poll_seconds = 1.0
+# Fast, cost-sensitive default for routine Telegram tasks. Override both values for
+# workloads that need more capability or deeper reasoning.
+model = "gpt-5.6-luna"
+reasoning_effort = "low"
+
+[heartbeat]
+disk_warning_percent = 85
+disk_critical_percent = 95
+memory_available_warning_percent = 10
+load_per_cpu_warning = 2.0
+cpu_temperature_warning_c = 85
+repeat_alert_seconds = 21600
+
+[backup]
+checkout = "/var/lib/home-agent-backup/repo"

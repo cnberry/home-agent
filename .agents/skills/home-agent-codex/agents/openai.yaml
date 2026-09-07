@@ -1,0 +1,4 @@
+interface:
+  display_name: "Home Agent Codex"
+  short_description: "Chat with Home Agent through its persistent queue"
+  default_prompt: "Use $home-agent-codex to send this message to Home Agent Codex and return its reply here."

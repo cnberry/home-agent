@@ -1,0 +1,23 @@
+[Unit]
+Description=Home Agent Codex Telegram agent
+Documentation=https://github.com/cnberry/home-agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=home-agent
+Group=home-agent
+WorkingDirectory=/srv/home-agent/workspace
+Environment=CODEX_HOME=/var/lib/home-agent/codex-home
+Environment=HOME_AGENT_CONFIG=/etc/home-agent/config.toml
+Environment=PYTHONUNBUFFERED=1
+LoadCredential=telegram-token:/etc/home-agent/credentials/telegram-token
+ExecStart=/opt/home-agent/current/venv/bin/home-agent run
+Restart=always
+RestartSec=5s
+TimeoutStopSec=45s
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
