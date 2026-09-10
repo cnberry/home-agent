@@ -1,0 +1,4 @@
+# Managed by Home Agent. Daily at local midnight; inspect journalctl -u home-agent-optimize.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin
+0 0 * * * root /usr/bin/systemctl start --no-block home-agent-optimize.service

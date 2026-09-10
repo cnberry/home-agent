@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from telegram import Bot, Chat, Update
+from telegram import Bot, Chat, Message, Update
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -41,16 +41,33 @@ def split_text(text: str, limit: int = TELEGRAM_CHUNK) -> list[str]:
 
 
 class TelegramNotifier:
-    def __init__(self, bot: Bot, owner_id: int) -> None:
+    def __init__(self, bot: Bot, owner_id: int, database: Database) -> None:
         self.bot = bot
+        self.database = database
         self.owner_id = owner_id
+
+    async def _deliver(self, job: Job, method: str, **kwargs: Any) -> Any:
+        self.database.record_event("delivery_attempt", job_id=job.id, details=kwargs)
+        try:
+            result = await getattr(self.bot, method)(**kwargs)
+        except Exception as exc:
+            self.database.record_event(
+                "delivery_failed",
+                job_id=job.id,
+                details={"error": safe_error(exc), "method": method},
+            )
+            raise
+        self.database.record_event("delivered", job_id=job.id, details={"method": method, **kwargs})
+        return result
 
     async def _send_or_edit(self, job: Job, text: str) -> None:
         chunks = split_text(text)
         chat_id = job.telegram_chat_id or self.owner_id
         if job.ack_message_id and job.kind == "telegram":
             try:
-                await self.bot.edit_message_text(
+                await self._deliver(
+                    job,
+                    "edit_message_text",
                     chat_id=chat_id,
                     message_id=job.ack_message_id,
                     text=chunks[0],
@@ -60,11 +77,13 @@ class TelegramNotifier:
             else:
                 chunks = chunks[1:]
         for chunk in chunks:
-            await self.bot.send_message(chat_id=chat_id, text=chunk)
+            await self._deliver(job, "send_message", chat_id=chat_id, text=chunk)
 
     async def working(self, job: Job) -> None:
         if job.kind == "telegram" and job.ack_message_id:
-            await self.bot.edit_message_text(
+            await self._deliver(
+                job,
+                "edit_message_text",
                 chat_id=job.telegram_chat_id or self.owner_id,
                 message_id=job.ack_message_id,
                 text=f"Working on #{job.id}…",
@@ -78,7 +97,9 @@ class TelegramNotifier:
 
     async def retrying(self, job: Job, delay_seconds: int) -> None:
         if job.kind == "telegram" and job.ack_message_id:
-            await self.bot.edit_message_text(
+            await self._deliver(
+                job,
+                "edit_message_text",
                 chat_id=job.telegram_chat_id or self.owner_id,
                 message_id=job.ack_message_id,
                 text=f"Job #{job.id} hit a transient error; retrying in {delay_seconds}s.",
@@ -107,7 +128,9 @@ class TelegramGateway:
         self.application: Application[Any, Any, Any, Any, Any, Any] = (
             application or ApplicationBuilder().token(token).build()
         )
-        self.notifier = TelegramNotifier(self.application.bot, settings.telegram_owner_id)
+        self.notifier = TelegramNotifier(
+            self.application.bot, settings.telegram_owner_id, self.database
+        )
         self.worker = Worker(
             self.database,
             self.codex,
@@ -152,8 +175,40 @@ class TelegramGateway:
             and message.forward_origin is None
         )
 
+    def _record_received(self, update: Update) -> None:
+        message = update.effective_message
+        self.database.record_event(
+            "received",
+            update_id=update.update_id,
+            details={
+                "text": message.text if message else None,
+                "sent_at": message.date.isoformat() if message else None,
+            },
+        )
+
     def first_seen(self, update: Update) -> bool:
+        self._record_received(update)
         return update.update_id is not None and self.database.record_update(update.update_id)
+
+    async def _reply(self, update: Update, text: str) -> Message:
+        message = update.effective_message
+        assert message is not None
+        self.database.record_event(
+            "reply_attempt", update_id=update.update_id, details={"text": text}
+        )
+        try:
+            result = await message.reply_text(text)
+        except Exception as exc:
+            self.database.record_event(
+                "reply_failed", update_id=update.update_id, details={"error": safe_error(exc)}
+            )
+            raise
+        self.database.record_event(
+            "reply_delivered",
+            update_id=update.update_id,
+            details={"text": text, "message_id": result.message_id},
+        )
+        return result
 
     async def _post_init(self, _: Application[Any, Any, Any, Any, Any, Any]) -> None:
         interrupted = self.database.recover_interrupted()
@@ -189,23 +244,25 @@ class TelegramGateway:
             or not update.effective_message
         ):
             return
-        await update.effective_message.reply_text(
+        await self._reply(
+            update,
             "Home Agent runs Codex with full system access and passwordless sudo.\n\n"
             "Send text to queue a task.\n"
             "/new — start a fresh Codex conversation\n"
             "/status — show queue and service state\n"
             "/stop — interrupt the active turn\n"
             "/heartbeat — queue an immediate heartbeat\n"
-            "/retry <id> — retry a failed or uncertain job"
+            "/retry <id> — retry a failed or uncertain job",
         )
 
     async def text_message(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if not self.authorized(update) or not update.effective_message:
             return
+        self._record_received(update)
         text = update.effective_message.text or ""
         if len(text) > self.settings.max_input_chars:
-            await update.effective_message.reply_text(
-                f"Message is too long; limit is {self.settings.max_input_chars} characters."
+            await self._reply(
+                update, f"Message is too long; limit is {self.settings.max_input_chars} characters."
             )
             return
         try:
@@ -217,11 +274,11 @@ class TelegramGateway:
                 telegram_message_id=update.effective_message.message_id,
             )
         except QueueFullError:
-            await update.effective_message.reply_text("Queue is full; use /status or /stop first.")
+            await self._reply(update, "Queue is full; use /status or /stop first.")
             return
         if job is None:
             return
-        acknowledgement = await update.effective_message.reply_text(f"Queued #{job.id}.")
+        acknowledgement = await self._reply(update, f"Queued #{job.id}.")
         self.database.set_ack_message(job.id, acknowledgement.message_id)
 
     async def new_command(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -232,11 +289,9 @@ class TelegramGateway:
         ):
             return
         if await self.worker.archive_telegram_thread():
-            await update.effective_message.reply_text("A fresh Codex conversation will start next.")
+            await self._reply(update, "A fresh Codex conversation will start next.")
         else:
-            await update.effective_message.reply_text(
-                "Work is queued or active; use /stop or wait before /new."
-            )
+            await self._reply(update, "Work is queued or active; use /stop or wait before /new.")
 
     async def stop_command(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if (
@@ -246,9 +301,9 @@ class TelegramGateway:
         ):
             return
         if await self.worker.interrupt():
-            await update.effective_message.reply_text("Interrupt requested for the active job.")
+            await self._reply(update, "Interrupt requested for the active job.")
         else:
-            await update.effective_message.reply_text("No active Codex turn.")
+            await self._reply(update, "No active Codex turn.")
 
     async def heartbeat_command(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if (
@@ -260,10 +315,10 @@ class TelegramGateway:
         try:
             job = enqueue_heartbeat(self.settings, self.database, force=True)
         except QueueFullError:
-            await update.effective_message.reply_text("Queue is full; heartbeat was not queued.")
+            await self._reply(update, "Queue is full; heartbeat was not queued.")
             return
         text = f"Heartbeat queued as #{job.id}." if job else "A heartbeat is already queued."
-        await update.effective_message.reply_text(text)
+        await self._reply(update, text)
 
     async def retry_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if (
@@ -274,18 +329,18 @@ class TelegramGateway:
             return
         arguments = context.args or []
         if len(arguments) != 1 or not arguments[0].isdigit():
-            await update.effective_message.reply_text("Usage: /retry <job-id>")
+            await self._reply(update, "Usage: /retry <job-id>")
             return
         try:
             job = self.database.retry(int(arguments[0]))
         except QueueFullError:
-            await update.effective_message.reply_text("Queue is full; retry was not queued.")
+            await self._reply(update, "Queue is full; retry was not queued.")
             return
         if job:
-            acknowledgement = await update.effective_message.reply_text(f"Requeued #{job.id}.")
+            acknowledgement = await self._reply(update, f"Requeued #{job.id}.")
             self.database.set_ack_message(job.id, acknowledgement.message_id)
         else:
-            await update.effective_message.reply_text("Job is not retryable or does not exist.")
+            await self._reply(update, "Job is not retryable or does not exist.")
 
     async def status_command(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if (
@@ -303,13 +358,14 @@ class TelegramGateway:
             elapsed = int((datetime.now(timezone.utc) - started).total_seconds())
             active = f"#{snapshot.active.id} ({snapshot.active.kind}, {elapsed}s)"
         degraded = bool(self.database.get_metadata("authentication_degraded"))
-        await update.effective_message.reply_text(
+        await self._reply(
+            update,
             f"Active: {active}\n"
             f"Queued: {snapshot.queued}\n"
             f"Last success: {snapshot.last_completed_at or 'never'}\n"
             f"Last heartbeat: {snapshot.last_heartbeat_at or 'never'}\n"
             f"Model: {self.settings.model} ({self.settings.reasoning_effort} reasoning)\n"
-            f"Authentication: {'needs attention' if degraded else 'ok'}"
+            f"Authentication: {'needs attention' if degraded else 'ok'}",
         )
 
     async def unsupported_message(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -319,9 +375,7 @@ class TelegramGateway:
             or not update.effective_message
         ):
             return
-        await update.effective_message.reply_text(
-            "Version 1 accepts text messages and commands only."
-        )
+        await self._reply(update, "Version 1 accepts text messages and commands only.")
 
     async def error_handler(self, _: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         LOGGER.error("Telegram update failed: %s", safe_error(context.error or "unknown error"))

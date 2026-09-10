@@ -13,9 +13,12 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 
+systemctl stop home-agent-optimize.service 2>/dev/null || true
+rm -f -- /etc/cron.d/home-agent-optimize
 systemctl disable --now home-agent.service home-agent-heartbeat.timer home-agent-state-backup.timer 2>/dev/null || true
 rm -f -- \
   /etc/sudoers.d/home-agent \
+  /etc/systemd/system/home-agent-optimize.service \
   /etc/systemd/system/home-agent.service \
   /etc/systemd/system/home-agent-heartbeat.service \
   /etc/systemd/system/home-agent-heartbeat.timer \

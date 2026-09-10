@@ -44,6 +44,11 @@ class Settings:
     load_per_cpu_warning: float = 2.0
     cpu_temperature_warning_c: float = 85.0
     heartbeat_repeat_seconds: int = 21_600
+    optimization_checkout: Path = Path("/srv/home-agent/development/home-agent")
+    optimization_repository: str = "https://github.com/cnberry/home-agent.git"
+    optimization_model: str = DEFAULT_MODEL
+    optimization_reasoning_effort: str = "high"
+    optimization_timeout_seconds: int = 7_200
 
     @property
     def tasks_file(self) -> Path:
@@ -123,6 +128,7 @@ def load_settings(path: Path | None = None) -> Settings:
     agent = _table(data, "agent")
     heartbeat = _table(data, "heartbeat")
     backup = _table(data, "backup")
+    optimization = _table(data, "optimization")
 
     owner_id = telegram.get("owner_id")
     if not isinstance(owner_id, int) or isinstance(owner_id, bool) or owner_id <= 0:
@@ -131,6 +137,17 @@ def load_settings(path: Path | None = None) -> Settings:
     defaults = Settings(telegram_owner_id=owner_id)
     settings = Settings(
         telegram_owner_id=owner_id,
+        optimization_checkout=_path(
+            optimization.get("checkout"), defaults.optimization_checkout, "optimization.checkout"
+        ),
+        optimization_repository=optimization.get("repository", defaults.optimization_repository),
+        optimization_model=optimization.get("model", defaults.optimization_model),
+        optimization_reasoning_effort=optimization.get(
+            "reasoning_effort", defaults.optimization_reasoning_effort
+        ),
+        optimization_timeout_seconds=_integer(
+            optimization, "timeout_seconds", defaults.optimization_timeout_seconds, "optimization"
+        ),
         workspace=_path(agent.get("workspace"), defaults.workspace, "agent.workspace"),
         data_dir=_path(agent.get("data_dir"), defaults.data_dir, "agent.data_dir"),
         database_path=_path(
@@ -198,4 +215,18 @@ def load_settings(path: Path | None = None) -> Settings:
     ):
         choices = ", ".join(sorted(REASONING_EFFORTS))
         raise ConfigError(f"agent.reasoning_effort must be one of: {choices}")
+    if (
+        not isinstance(settings.optimization_repository, str)
+        or not settings.optimization_repository
+    ):
+        raise ConfigError("optimization.repository must be nonempty")
+    if not isinstance(settings.optimization_model, str) or not settings.optimization_model.strip():
+        raise ConfigError("optimization.model must be nonempty")
+    if (
+        not isinstance(settings.optimization_reasoning_effort, str)
+        or settings.optimization_reasoning_effort not in REASONING_EFFORTS
+    ):
+        raise ConfigError("optimization.reasoning_effort is invalid")
+    if not 30 <= settings.optimization_timeout_seconds <= 10_000:
+        raise ConfigError("optimization.timeout_seconds must be between 30 and 10000")
     return settings

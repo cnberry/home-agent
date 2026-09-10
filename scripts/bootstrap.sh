@@ -67,10 +67,10 @@ if [[ "$distro_family" == "debian" ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends \
-    ca-certificates curl git openssh-client python3 python3-venv sudo
+    ca-certificates curl git openssh-client python3 python3-venv sudo cron gh
 else
   pacman -S --needed --noconfirm \
-    ca-certificates curl git openssh python python-pip sudo
+    ca-certificates curl git openssh python python-pip sudo cronie github-cli
 fi
 
 python3 - <<'PY'
@@ -98,6 +98,7 @@ install -d -o root -g root -m 0755 "$install_root/releases" "$project_root"
 install -d -o "$agent_user" -g "$agent_user" -m 0700 "$data_root/runtime" "$data_root/codex-home"
 install -d -o "$agent_user" -g "$state_group" -m 2750 "$data_root/durable"
 install -d -o "$agent_user" -g "$agent_user" -m 0750 "$project_root/workspace"
+install -d -o "$agent_user" -g "$agent_user" -m 0700 "$project_root/development" "$data_root/optimization"
 install -d -o "$backup_user" -g "$backup_user" -m 0700 "$backup_root" "$backup_root/.ssh"
 install -d -o root -g "$state_group" -m 0750 "$config_root"
 install -d -o root -g root -m 0700 "$config_root/credentials"
@@ -138,7 +139,7 @@ if [[ ! -d "$project_root/.git" ]]; then
 fi
 install -o root -g root -m 0644 "$source_root/deploy/AGENTS.runtime.md" "$project_root/AGENTS.md"
 
-for state_file in tasks.md memory.md heartbeat.md; do
+for state_file in tasks.md memory.md heartbeat.md optimization.md; do
   if [[ ! -e "$data_root/durable/$state_file" ]]; then
     install -o "$agent_user" -g "$state_group" -m 0640 "$source_root/deploy/durable/$state_file" "$data_root/durable/$state_file"
   fi
@@ -241,5 +242,13 @@ if [[ "$backup_configured" == true && -d "$backup_root/repo/.git" ]]; then
 else
   systemctl disable --now home-agent-state-backup.timer 2>/dev/null || true
 fi
+install -d -o root -g root -m 0755 /etc/cron.d
+install -o root -g root -m 0644 "$source_root/deploy/cron.d/home-agent-optimize" /etc/cron.d/home-agent-optimize
+if [[ "$distro_family" == "debian" ]]; then
+  systemctl enable --now cron.service
+else
+  systemctl enable --now cronie.service
+fi
+echo "Nightly improvement review installed for midnight in the host timezone."
 echo "Home Agent installed at release $version."
 echo "Configure a private state repository, then run scripts/configure-backup.sh."

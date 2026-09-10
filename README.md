@@ -272,3 +272,13 @@ python3 -m venv .venv
 
 Runtime dependencies and the embedded Codex runtime are intentionally pinned. Refresh locks with
 `pip-compile --generate-hashes` only in a reviewed dependency-update change.
+
+## Daily improvement loop
+
+Installation enables a midnight cron job that reviews private timestamped interactions and can
+ship tested improvements through PR → passing CI → merge → release → deploy. The reviewer runs
+separately from the Telegram queue and considers code, prompts, model choice, reasoning effort,
+context, tools and transport latency. It preserves failed attempts and chooses a measured NOOP
+when there is no justified change. Configure GitHub publishing access for the service account.
+See [interaction logging and nightly operations](docs/OPTIMIZATION.md) for privacy, configuration,
+report-only verification, deployment rollback, and pausing the schedule.

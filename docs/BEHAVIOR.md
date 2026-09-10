@@ -56,3 +56,15 @@ in CI rather than Python tests that search shell scripts for particular strings.
 Run `ruff check .`, `mypy src`, and `pytest` after Python changes. A green suite is
 not a live-host deployment test. Restore replaces each file atomically, but does
 not promise a transaction across all three files on power loss or disk failure.
+
+## Interaction evidence and daily development
+
+- Every authorized inbound message, queue transition/attempt, response and transport outcome
+  has a durable timestamped private event; retrying never erases prior attempt history.
+- At local midnight the installed cron schedule starts an independent improvement review.
+  Reviews never consume the Telegram FIFO or conversation, never overlap, and do not silently
+  replay an uncertain review. They preserve private evidence and compare real measurements.
+- Improvements use synthetic evaluation, passing CI, normal PR merge rules and versioned
+  releases. Deployment pauses new claims and drains active work while retaining queued tasks;
+  failed deployment restores the previous code release. No supported change may weaken owner
+  checks or uncertain-action no-replay guarantees.
