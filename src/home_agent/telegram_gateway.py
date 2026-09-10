@@ -280,6 +280,7 @@ class TelegramGateway:
             return
         acknowledgement = await self._reply(update, f"Queued #{job.id}.")
         self.database.set_ack_message(job.id, acknowledgement.message_id)
+        self.worker.wake()
 
     async def new_command(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if (
@@ -319,6 +320,8 @@ class TelegramGateway:
             return
         text = f"Heartbeat queued as #{job.id}." if job else "A heartbeat is already queued."
         await self._reply(update, text)
+        if job:
+            self.worker.wake()
 
     async def retry_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if (
@@ -339,6 +342,7 @@ class TelegramGateway:
         if job:
             acknowledgement = await self._reply(update, f"Requeued #{job.id}.")
             self.database.set_ack_message(job.id, acknowledgement.message_id)
+            self.worker.wake()
         else:
             await self._reply(update, "Job is not retryable or does not exist.")
 
