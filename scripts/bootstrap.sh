@@ -118,7 +118,8 @@ if [[ ! -f "$release_dir/.build-complete" ]]; then
     rm -rf -- "$release_dir/.git"
   fi
   chown -R root:root "$release_dir"
-  chmod -R go-w "$release_dir"
+  # Release contents are root-owned, but the service user must traverse and read them.
+  chmod -R go+rX,go-w "$release_dir"
   python3 -m venv "$release_dir/venv"
   "$release_dir/venv/bin/python" -m pip install --disable-pip-version-check --require-hashes -r "$release_dir/requirements.lock"
   "$release_dir/venv/bin/python" -m pip install --disable-pip-version-check \
