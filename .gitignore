@@ -29,3 +29,7 @@ codex-home/
 # Local configuration
 config.toml
 !deploy/config.example.toml
+
+# Private daily interaction evidence
+optimization/
+interaction-reports/

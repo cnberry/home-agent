@@ -1,0 +1,21 @@
+[Unit]
+Description=Home Agent daily interaction improvement loop
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=home-agent
+Group=home-agent
+WorkingDirectory=/srv/home-agent/workspace
+Environment=HOME=/var/lib/home-agent
+Environment=CODEX_HOME=/var/lib/home-agent/codex-home
+Environment=HOME_AGENT_CONFIG=/etc/home-agent/config.toml
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/home-agent/current/venv/bin/agentctl optimize
+TimeoutStartSec=3h
+TimeoutStopSec=30s
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077

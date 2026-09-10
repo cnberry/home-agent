@@ -321,3 +321,28 @@ def test_worker_failure_shuts_down_service(
     assert not timed_out, "A dead worker left the service running without processing jobs"
     assert runtime.closed
     assert "Home Agent worker stopped" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_commands_questions_and_transport_results_are_timestamped(
+    gateway: tuple[TelegramGateway, TelegramAPI, Runtime],
+) -> None:
+    value, api, _ = gateway
+    await value.application.process_update(telegram_update(value, '/status'))
+    await value.application.process_update(telegram_update(value, 'question', update_id=2))
+    api.fail_edits = True
+    task = asyncio.create_task(value.worker.run())
+    try:
+        await wait_for_job(value, 1, 'completed')
+    finally:
+        await value.worker.stop()
+        await asyncio.wait_for(task, 2)
+    with value.database.connect() as conn:
+        events = [dict(row) for row in conn.execute('SELECT * FROM interaction_events ORDER BY id')]
+    received = [e for e in events if e['event'] == 'received']
+    assert len(received) == 2
+    assert '/status' in received[0]['details'] and 'question' in received[1]['details']
+    assert all(e['occurred_at'] for e in events)
+    assert any(e['event'] == 'reply_delivered' and e['update_id'] == 1 for e in events)
+    assert any(e['event'] == 'delivery_failed' and e['job_id'] == 1 for e in events)
+    assert any(e['event'] == 'delivered' and 'done' in e['details'] for e in events)

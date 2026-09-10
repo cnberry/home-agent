@@ -238,6 +238,9 @@ def bridge(args: argparse.Namespace) -> int:
             print(f"Bridge job #{job.id} disappeared.", file=sys.stderr)
             return 1
         if current.status == "completed":
+            database.record_event(
+                "bridge_delivered", job_id=job.id, details={"response": current.response}
+            )
             print(current.response or "")
             return 0
         if current.status in {"failed", "cancelled", "uncertain"}:
@@ -253,12 +256,40 @@ def bridge(args: argparse.Namespace) -> int:
     return 124
 
 
+def optimize(args: argparse.Namespace) -> int:
+    from home_agent.optimization import run_review
+
+    return run_review(_settings(args), report_only=args.report_only)
+
+
+def deployment_pause(args: argparse.Namespace) -> int:
+    settings = _settings(args)
+    database = Database(settings.database_path, settings.max_queue)
+    database.initialize()
+    database.set_metadata("deployment_paused", not args.resume)
+    if not args.resume:
+        deadline = time.monotonic() + 120
+        while database.active_job() is not None:
+            if time.monotonic() >= deadline:
+                database.set_metadata("deployment_paused", False)
+                print("Active work did not drain; deployment cancelled.", file=sys.stderr)
+                return 1
+            time.sleep(1)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentctl")
     parser.add_argument("--config", help="configuration path")
     parser.add_argument("--verbose", action="store_true")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    optimizer = subparsers.add_parser("optimize", help="run the daily improvement review")
+    optimizer.add_argument("--report-only", action="store_true")
+    optimizer.set_defaults(func=optimize)
+    pause = subparsers.add_parser("deployment-pause", help="drain active work before deployment")
+    pause.add_argument("--resume", action="store_true")
+    pause.set_defaults(func=deployment_pause)
     subparsers.add_parser("run", help="run the Telegram gateway").set_defaults(func=run_agent)
     heartbeat = subparsers.add_parser("heartbeat", help="enqueue a heartbeat")
     heartbeat.add_argument("--force", action="store_true")

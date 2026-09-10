@@ -132,6 +132,14 @@ class Worker:
     async def _process(self, job: Job) -> None:
         LOGGER.info("job_started id=%s kind=%s attempt=%s", job.id, job.kind, job.attempts)
         await self._notify(lambda: self.notifier.working(job))
+        self.database.record_event(
+            "runtime_config",
+            job_id=job.id,
+            details={
+                "model": getattr(self.codex, "model", None),
+                "reasoning_effort": getattr(self.codex, "reasoning_effort", None),
+            },
+        )
         thread_id = self.database.get_thread(job.kind)
 
         def check_interrupted() -> None:
