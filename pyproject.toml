@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "home-agent"
-version = "0.4.0"
+version = "0.4.1"
 description = "Tiny, persistent Telegram remote control for a local Codex agent"
 readme = "README.md"
 requires-python = ">=3.10"

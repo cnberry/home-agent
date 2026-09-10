@@ -4,7 +4,6 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Literal, Protocol
 
@@ -75,14 +74,21 @@ class Worker:
         self.notifier = notifier
         self.poll_seconds = poll_seconds
         self._stop = asyncio.Event()
+        self._wake = asyncio.Event()
         self._cancelled_job_id: int | None = None
         self._thread_lock = asyncio.Lock()
 
+    def wake(self) -> None:
+        """Wake an idle worker after a producer added work in this process."""
+        self._wake.set()
+
     async def run(self) -> None:
         while not self._stop.is_set():
+            # Clear before claiming so a producer racing with claim_next either
+            # leaves a queued job for this pass or leaves the wake event set.
+            self._wake.clear()
             if self.database.get_metadata("authentication_degraded") is True:
-                with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(self._stop.wait(), timeout=self.poll_seconds)
+                await self._wait_for_activity()
                 continue
             async with self._thread_lock:
                 if self._stop.is_set():
@@ -91,9 +97,24 @@ class Worker:
                 if job is not None:
                     await self._process(job)
             if job is None:
-                with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(self._stop.wait(), timeout=self.poll_seconds)
+                await self._wait_for_activity()
                 continue
+
+    async def _wait_for_activity(self) -> None:
+        if self._stop.is_set() or self._wake.is_set():
+            return
+        stop_task = asyncio.create_task(self._stop.wait())
+        wake_task = asyncio.create_task(self._wake.wait())
+        try:
+            await asyncio.wait(
+                (stop_task, wake_task),
+                timeout=self.poll_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (stop_task, wake_task):
+                task.cancel()
+            await asyncio.gather(stop_task, wake_task, return_exceptions=True)
 
     async def stop(self) -> None:
         self._stop.set()
