@@ -62,7 +62,9 @@ nightly schedule, remove `/etc/cron.d/home-agent-optimize` and stop its service;
 reinstalls the default schedule. Uninstall removes both the cron entry and service, preserving
 private history unless `--purge` is explicit.
 
-`sudo scripts/update.sh` drains the active turn while preserving queued work, installs the
+`sudo /opt/home-agent/current/scripts/deploy-release.sh vX.Y.Z MERGED_SHA` fetches a
+published tag into root-owned staging, verifies the full merge SHA and invokes the update
+helper without disabling Git ownership checks. `scripts/update.sh` drains the active turn while preserving queued work, installs the
 release, checks service health, and resumes processing. On an error it restores the previous
 release pointer and restarts the gateway. The first upgrade from pre-pause versions requires an
 empty queue and stops the gateway before installation. Code rollback does not undo arbitrary

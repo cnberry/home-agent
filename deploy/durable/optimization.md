@@ -58,8 +58,10 @@ restrictions, durable queue semantics, cancellation, secret handling, or no-repl
    commit, confirm CI passed and tag exactly that commit with the corresponding unused version.
    Publish a GitHub release with concise user-visible changes and verification. Never move or
    overwrite an existing tag. Check for partial previous releases before retrying.
-7. Deploy only the tested merged release using scripts/update.sh as root from a clean checkout
-   of that release. That helper drains active work, preserves queued jobs and resumes the worker,
+7. Deploy only the tested merged release using the installed root-owned
+   `/opt/home-agent/current/scripts/deploy-release.sh TAG MERGED_SHA` via sudo. It fetches
+   the published tag into a root-owned staging checkout, verifies the exact SHA, then runs
+   scripts/update.sh. Never add safe.directory exceptions for service-owned checkouts. That helper drains active work, preserves queued jobs and resumes the worker,
    verifies startup/health and rolls back the release pointer on failure. Do not restart this
    optimization service mid-review. Preserve native configuration, authentication and unrelated
    cron schedules. If active work cannot drain, record the pending deployment for the next run.
