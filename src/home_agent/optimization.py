@@ -12,6 +12,7 @@ from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from home_agent import __version__
 from home_agent.codex_runtime import CodexRuntime
 from home_agent.config import Settings
 from home_agent.database import Database, utc_now
@@ -97,6 +98,7 @@ def export_interactions(settings: Settings, directory: Path) -> dict[str, Any]:
                 (datetime.fromisoformat(job["completed_at"]) - created).total_seconds()
             )
     summary = {
+        "version": __version__,
         "generated_at": utc_now(),
         "start_inclusive": start.isoformat(),
         "end_exclusive": end.isoformat(),

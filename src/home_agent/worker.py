@@ -8,6 +8,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Literal, Protocol
 
+from home_agent import __version__
 from home_agent.codex_runtime import (
     CodexInterrupted,
     CodexResult,
@@ -136,6 +137,7 @@ class Worker:
             "runtime_config",
             job_id=job.id,
             details={
+                "version": __version__,
                 "model": getattr(self.codex, "model", None),
                 "reasoning_effort": getattr(self.codex, "reasoning_effort", None),
             },
