@@ -102,3 +102,13 @@ def test_bridge_timeout_keeps_work_durable_and_queue_bounded(
     second = cli("bridge", "--wait-timeout", "0", input="second task")
     assert second.returncode == 1, second.stderr
     assert second.stderr.strip()
+
+
+def test_panel_queue_is_independent_of_full_telegram_queue(
+    cli: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    assert cli("bridge", "--wait-timeout", "0", input="telegram work").returncode == 124
+    assert cli("panel-bridge", "--wait-timeout", "0", input="panel work").returncode == 124
+    # Both independent queues retain their own pending task across CLI restarts.
+    assert cli("bridge", "--wait-timeout", "0", input="second telegram").returncode == 1
+    assert cli("panel-bridge", "--wait-timeout", "0", input="second panel").returncode == 1
