@@ -77,9 +77,12 @@ class CodexRuntime:
         timeout_seconds: int,
         model: str,
         reasoning_effort: str,
+        developer_instructions: str = DEVELOPER_INSTRUCTIONS,
+        client_title: str = "Home Agent Telegram",
     ) -> None:
         environment = os.environ.copy()
         environment["CODEX_HOME"] = str(codex_home)
+        self.developer_instructions = developer_instructions
         self.workspace = workspace
         self.timeout_seconds = timeout_seconds
         self.model = model
@@ -89,7 +92,7 @@ class CodexRuntime:
                 cwd=str(workspace),
                 env=environment,
                 client_name="home_agent",
-                client_title="Home Agent Telegram",
+                client_title=client_title,
             )
         )
         self._active_handle: AsyncTurnHandle | None = None
@@ -174,7 +177,7 @@ class CodexRuntime:
                 thread_id,
                 approval_mode=ApprovalMode.deny_all,
                 cwd=str(self.workspace),
-                developer_instructions=DEVELOPER_INSTRUCTIONS,
+                developer_instructions=self.developer_instructions,
                 model=self.model,
                 sandbox=Sandbox.full_access,
             )
@@ -182,7 +185,7 @@ class CodexRuntime:
             thread = await self._codex.thread_start(
                 approval_mode=ApprovalMode.deny_all,
                 cwd=str(self.workspace),
-                developer_instructions=DEVELOPER_INSTRUCTIONS,
+                developer_instructions=self.developer_instructions,
                 model=self.model,
                 sandbox=Sandbox.full_access,
                 service_name="home-agent",

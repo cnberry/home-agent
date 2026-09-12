@@ -227,6 +227,26 @@ The default model is `gpt-5.6-luna` with `low` reasoning for responsive, cost-se
 work. Override `agent.model` and `agent.reasoning_effort` in `/etc/home-agent/config.toml` when a
 task profile needs more capability.
 
+## Independent panel queue
+
+`agentctl panel-run` runs a dedicated panel worker using the same pinned Codex SDK,
+workspace, login and tools. `agentctl panel-bridge` accepts a prompt on stdin and
+returns its response. Both derive a separate `.panel.sqlite3` database alongside
+the configured main database. Panel jobs and Codex conversation IDs never enter
+the Telegram/heartbeat queue. One panel turn runs at a time; the independent
+workers can operate concurrently and share the host/workspace.
+
+Panel responses use concise plain-text instructions for a small display. The panel
+worker does not load a Telegram token or construct a Telegram notifier. The existing
+interactive job/thread label is reused only inside the separate panel database.
+Restart recovery and uncertain-action no-replay behavior are shared with Home Agent.
+A process lock prevents two panel workers from consuming the same queue.
+
+A deployment must authenticate access to `panel-bridge`; it is an administrative
+interface with the same Home Agent authority. Private socket/gateway configuration
+and device UI belong in the client deployment repository. No network listener is
+added by these CLI commands.
+
 ## Telegram commands
 
 - Plain text queues a Codex task and returns `Queued #<id>`.
