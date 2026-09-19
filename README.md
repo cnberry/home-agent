@@ -227,6 +227,13 @@ The default model is `gpt-5.6-luna` with `low` reasoning for responsive, cost-se
 work. Override `agent.model` and `agent.reasoning_effort` in `/etc/home-agent/config.toml` when a
 task profile needs more capability.
 
+## CPU local-intent experiment
+
+For an optional CPU-only device-command latency experiment, see
+[local Qwen intent worker](experiments/local-intent/README.md). It includes pinned
+installation, immediate socket wakeup, and an opt-in benchmark. The production
+Codex/Telegram path is unchanged.
+
 ## Telegram commands
 
 - Plain text queues a Codex task and returns `Queued #<id>`.
