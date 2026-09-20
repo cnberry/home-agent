@@ -44,3 +44,9 @@ missing timing counts, clarification/fallback rates and verified outcomes using
 `agentctl performance`. Retain failed trials; separate injected faults and
 synthetic benchmarks from real Telegram traffic. See the
 [architecture](qwen-routing.md#performance-evidence-and-goals) for exact boundaries.
+
+A subsequent real owner Telegram message reached the production Qwen route:
+durable acceptance 30.238 ms, queue receipt to claim 42.756 ms, inference 350.603 ms,
+and verified read-only completion 954.162 ms. This confirms real Telegram intake,
+not just the synthetic submission path. These durations start at host receipt;
+this sample's Telegram delivery duration was not extracted from the private outbox.
