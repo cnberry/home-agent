@@ -13,6 +13,8 @@ max_input_chars = 12000
 max_queue = 20
 turn_timeout_seconds = 2700
 worker_poll_seconds = 1.0
+# Optional private catalog/executor config. Enables wake-driven intake and durable replies.
+# routing_config = "/etc/home-agent/routing.json"
 # Fast, cost-sensitive default for routine Telegram tasks. Override both values for
 # workloads that need more capability or deeper reasoning.
 model = "gpt-5.6-luna"
