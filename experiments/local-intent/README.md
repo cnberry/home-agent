@@ -5,6 +5,11 @@ a resident Qwen model, runs `switchctl`, and returns the verified result. It is
 separate from the production Codex/Telegram worker. It does not change that
 worker's model, persistent conversations, queue, or SSH bridge.
 
+For the approved production integration design, see the
+[Qwen-first routing architecture](../../docs/architecture/qwen-routing.md),
+including component, job, side-effect, and reply-delivery diagrams. The experiment
+is a measured building block; it does not implement that architecture yet.
+
 The worker waits in blocking Unix-socket accept/reads. Socket readiness wakes it
 immediately; replies go directly to the caller. There is no job/reply polling
 interval. llama.cpp runs with `--poll 0 --poll-batch 0`, disabling inference-thread

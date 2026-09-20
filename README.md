@@ -234,6 +234,10 @@ For an optional CPU-only device-command latency experiment, see
 installation, immediate socket wakeup, and an opt-in benchmark. The production
 Codex/Telegram path is unchanged.
 
+The approved [Qwen-first routing architecture](docs/architecture/qwen-routing.md)
+describes the planned Telegram integration, durable state transitions, immediate
+wakeups, and Codex fallback. This production integration is not implemented yet.
+
 ## Telegram commands
 
 - Plain text queues a Codex task and returns `Queued #<id>`.
