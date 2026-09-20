@@ -254,3 +254,6 @@ new queue and outbox. `observe` records eligible proposals and then uses Codex
 without local dispatch. Drain active work before binary rollback, retain a database
 backup, and preserve uncertainty evidence. The schema migration is additive; do
 not delete jobs or outbox rows as a rollback mechanism.
+
+The [initial deployed baseline](qwen-baseline.md) records the measured sample and
+its limits; it does not replace the reliability objectives above.
