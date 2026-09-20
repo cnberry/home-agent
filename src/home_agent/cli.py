@@ -57,6 +57,12 @@ def run_agent(args: argparse.Namespace) -> int:
 
 def queue_heartbeat(args: argparse.Namespace) -> int:
     settings = _settings(args)
+    if settings.routing_config:
+        from home_agent.control import heartbeat
+
+        result = heartbeat(settings.database_path.with_suffix(".sock"), args.force)
+        print(json.dumps(result))
+        return 1 if "error" in result else 0
     database = Database(settings.database_path, settings.max_queue)
     database.initialize()
     try:
@@ -220,6 +226,18 @@ def bridge(args: argparse.Namespace) -> int:
         )
         return 2
 
+    if settings.routing_config:
+        from home_agent.control import submit
+
+        result = submit(
+            settings.database_path.with_suffix(".sock"),
+            prompt,
+            args.wait_timeout,
+            getattr(args, "source", "bridge"),
+            getattr(args, "request_id", None),
+        )
+        print(result.get("response") or result.get("error") or result.get("status"))
+        return 0 if result.get("status") == "completed" else 1
     database = Database(settings.database_path, settings.max_queue)
     database.initialize()
     try:
@@ -256,6 +274,14 @@ def bridge(args: argparse.Namespace) -> int:
     return 124
 
 
+def performance_report(args: argparse.Namespace) -> int:
+    from home_agent.performance import report
+
+    settings = _settings(args)
+    print(json.dumps(report(Database(settings.database_path), args.since, args.source), indent=2))
+    return 0
+
+
 def optimize(args: argparse.Namespace) -> int:
     from home_agent.optimization import run_review
 
@@ -267,6 +293,10 @@ def deployment_pause(args: argparse.Namespace) -> int:
     database = Database(settings.database_path, settings.max_queue)
     database.initialize()
     database.set_metadata("deployment_paused", not args.resume)
+    if settings.routing_config:
+        from home_agent.control import wake
+
+        wake(settings.database_path.with_suffix(".sock"))
     if not args.resume:
         deadline = time.monotonic() + 120
         while database.active_job() is not None:
@@ -320,7 +350,15 @@ def build_parser() -> argparse.ArgumentParser:
         "bridge", help="queue a Telegram-thread turn and print its response"
     )
     bridge_parser.add_argument("--wait-timeout", type=int, default=3000)
+    bridge_parser.add_argument("--source", choices=["bridge", "benchmark"], default="bridge")
+    bridge_parser.add_argument("--request-id")
     bridge_parser.set_defaults(func=bridge)
+    perf_parser = subparsers.add_parser(
+        "performance", help="report private success and latency evidence"
+    )
+    perf_parser.add_argument("--since", default="1970-01-01")
+    perf_parser.add_argument("--source", choices=["telegram", "bridge", "benchmark"])
+    perf_parser.set_defaults(func=performance_report)
     return parser
 
 

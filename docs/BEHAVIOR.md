@@ -68,3 +68,20 @@ not promise a transaction across all three files on power loss or disk failure.
   releases. Deployment pauses new claims and drains active work while retaining queued tasks;
   failed deployment restores the previous code release. No supported change may weaken owner
   checks or uncertain-action no-replay guarantees.
+
+## Optional local home controls
+
+When `[agent].routing_config` is configured, explicit basic device requests may
+use the resident CPU Qwen interpreter and a private allowlisted adapter. General
+requests and failures proven to precede execution use the existing Codex runtime.
+Invalid/ambiguous arguments require clarification. Possible side effects never
+trigger an unrestricted fallback or automatic replay; deterministic read-only
+reconciliation reports uncertainty. Codex authentication does not pause local controls.
+
+Routing mode uses immediate queue wakeups, a private daemon submission socket,
+and a durable independent Telegram reply outbox. The fast path sends the final
+reply without a queued/working API round trip. Performance evidence measures
+acceptance, queueing, inference, native CLI issue, verification and reply delivery
+separately, targeting >99% verified success and <1 second receipt-to-issue.
+See [architecture and state diagrams](architecture/qwen-routing.md) for precise
+boundaries, denominators, compatibility behavior, limitations and rollback.

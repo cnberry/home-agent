@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,8 +18,11 @@ from telegram.ext import (
 
 from home_agent.codex_runtime import CodexRuntime
 from home_agent.config import Settings
+from home_agent.control import ControlServer
 from home_agent.database import Database, Job, QueueFullError
 from home_agent.health import enqueue_heartbeat
+from home_agent.outbox import Outbox
+from home_agent.performance import accepted
 from home_agent.worker import AgentRuntime, Worker, safe_error
 
 LOGGER = logging.getLogger(__name__)
@@ -45,6 +49,7 @@ class TelegramNotifier:
         self.bot = bot
         self.database = database
         self.owner_id = owner_id
+        self.outbox: Outbox | None = None
 
     async def _deliver(self, job: Job, method: str, **kwargs: Any) -> Any:
         self.database.record_event("delivery_attempt", job_id=job.id, details=kwargs)
@@ -80,6 +85,8 @@ class TelegramNotifier:
             await self._deliver(job, "send_message", chat_id=chat_id, text=chunk)
 
     async def working(self, job: Job) -> None:
+        if self.outbox:
+            return
         if job.kind == "telegram" and job.ack_message_id:
             await self._deliver(
                 job,
@@ -90,9 +97,20 @@ class TelegramNotifier:
             )
 
     async def completed(self, job: Job, response: str) -> None:
+        if self.outbox:
+            self.outbox.notify()
+            return
         await self._send_or_edit(job, response)
 
     async def failed(self, job: Job, message: str) -> None:
+        if self.outbox:
+            with self.database.connect() as db:
+                db.execute(
+                    "INSERT OR IGNORE INTO outbox(job_id,text) VALUES(?,?)",
+                    (job.id, f"Job #{job.id}: {message}"),
+                )
+            self.outbox.notify()
+            return
         await self._send_or_edit(job, f"Job #{job.id}: {message}")
 
     async def retrying(self, job: Job, delay_seconds: int) -> None:
@@ -116,7 +134,11 @@ class TelegramGateway:
         codex: AgentRuntime | None = None,
     ) -> None:
         self.settings = settings
-        self.database = Database(settings.database_path, settings.max_queue)
+        self.database = Database(
+            settings.database_path,
+            settings.max_queue,
+            durable_replies=bool(settings.routing_config),
+        )
         self.database.initialize()
         self.codex: AgentRuntime = codex or CodexRuntime(
             settings.workspace,
@@ -136,7 +158,23 @@ class TelegramGateway:
             self.codex,
             self.notifier,
             poll_seconds=settings.worker_poll_seconds,
+            routing_config=settings.routing_config,
         )
+        self.control = (
+            ControlServer(self.database, self.worker, settings.database_path.with_suffix(".sock"))
+            if settings.routing_config
+            else None
+        )
+        self.outbox_task: asyncio.Task[None] | None = None
+        if self.control:
+            self.notifier.outbox = Outbox(self.database, self.notifier._send_or_edit)
+
+            def changed() -> None:
+                assert self.control is not None and self.notifier.outbox is not None
+                self.control.notify()
+                self.notifier.outbox.notify()
+
+            self.worker.on_result = changed
         self.worker_task: asyncio.Task[None] | None = None
         self._register_handlers()
         self.application.post_init = self._post_init
@@ -211,6 +249,8 @@ class TelegramGateway:
         return result
 
     async def _post_init(self, _: Application[Any, Any, Any, Any, Any, Any]) -> None:
+        if self.control:
+            await self.control.start()
         interrupted = self.database.recover_interrupted()
         for job in interrupted:
             try:
@@ -221,6 +261,12 @@ class TelegramGateway:
                 )
             except Exception as exc:
                 LOGGER.warning("restart notification failed: %s", safe_error(exc))
+        if self.control:
+            self.control.heartbeat = lambda force: enqueue_heartbeat(
+                self.settings, self.database, force=force
+            )
+            assert self.notifier.outbox is not None
+            self.outbox_task = asyncio.create_task(self.notifier.outbox.run())
         self.worker_task = asyncio.create_task(self.worker.run(), name="home-agent-worker")
         self.worker_task.add_done_callback(self._worker_done)
 
@@ -235,6 +281,12 @@ class TelegramGateway:
             await asyncio.gather(self.worker_task, return_exceptions=True)
 
     async def _post_shutdown(self, _: Application[Any, Any, Any, Any, Any, Any]) -> None:
+        if self.control:
+            await self.control.close()
+        if self.notifier.outbox:
+            await self.notifier.outbox.stop()
+        if self.outbox_task:
+            await self.outbox_task
         await self.codex.close()
 
     async def help_command(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -258,6 +310,7 @@ class TelegramGateway:
     async def text_message(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if not self.authorized(update) or not update.effective_message:
             return
+        received_ns = time.monotonic_ns()
         self._record_received(update)
         text = update.effective_message.text or ""
         if len(text) > self.settings.max_input_chars:
@@ -277,6 +330,10 @@ class TelegramGateway:
             await self._reply(update, "Queue is full; use /status or /stop first.")
             return
         if job is None:
+            return
+        if self.control:
+            accepted(self.database, job, received_ns, "telegram")
+            self.worker.wake()
             return
         acknowledgement = await self._reply(update, f"Queued #{job.id}.")
         self.database.set_ack_message(job.id, acknowledgement.message_id)

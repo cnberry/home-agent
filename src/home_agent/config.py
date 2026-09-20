@@ -36,6 +36,7 @@ class Settings:
     max_queue: int = 20
     turn_timeout_seconds: int = 2_700
     worker_poll_seconds: float = 1.0
+    routing_config: Path | None = None
     model: str = DEFAULT_MODEL
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     disk_warning_percent: float = 85.0
@@ -137,6 +138,11 @@ def load_settings(path: Path | None = None) -> Settings:
     defaults = Settings(telegram_owner_id=owner_id)
     settings = Settings(
         telegram_owner_id=owner_id,
+        routing_config=_path(
+            agent["routing_config"], Path("/etc/home-agent/routing.json"), "agent.routing_config"
+        )
+        if agent.get("routing_config")
+        else None,
         optimization_checkout=_path(
             optimization.get("checkout"), defaults.optimization_checkout, "optimization.checkout"
         ),

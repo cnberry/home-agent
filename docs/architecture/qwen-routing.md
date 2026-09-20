@@ -1,380 +1,256 @@
 # Qwen-first home control with Codex fallback
 
-Status: **approved design; production integration is not implemented yet**.
+Status: implemented by the local-Qwen PR; opt in using `[agent].routing_config`.
+Deployment and measured acceptance results are recorded separately from the design.
 
-This document is the implementation architecture for the local-intent PR. The PR
-currently provides a separate CPU Qwen experiment. Its socket worker demonstrates
-latency and constrained execution, but is not the production Telegram router or a
-durable queue. The sections below describe the intended integrated behavior.
-
-Related documents: [behavior contract](../BEHAVIOR.md),
-[security model](../SECURITY.md), [recovery](../RECOVERY.md), and
-[reproducible experiment](../../experiments/local-intent/README.md).
-
-## Decision and scope
-
-Home Agent owns authentication, durable jobs, routing, execution state, and replies.
-A resident Qwen model interprets routine home requests. Existing home-config
-adapters validate and execute supported operations. Codex handles unsupported
-requests and bounded recovery through the existing stable Codex Python SDK.
-No additional agent framework is introduced.
-
-The initial execution policy is one active job at a time, preserving ordered home
-mutations. A long Codex turn can delay later controls; queue wait is measured
-separately. Concurrent execution is a later decision requiring coordinated device
-locks across both paths. The first release must not silently reorder commands to
-make latency measurements look better.
-
-| Capability family | Candidate local operations |
-| --- | --- |
-| Switches | Power on/off, status |
-| Pool | Pump, cleaner, heating mode/setpoint, status |
-| Hot tub | Setpoint, status |
-| Climate | Heat/cool/off, setpoint, status |
-| Gates/doors | Open/close, status |
-
-This is an eligibility list, not a claim that every operation is already enabled
-or verified. Enable each operation only after its argument rules, outcome
-semantics, and language tests pass. Installation, configuration changes,
-scheduling, complex multi-step work, and broad house-guide questions initially
-use Codex. Ambiguous requests receive a clarification rather than a guessed action.
+Home Agent owns owner authentication, the durable FIFO queue, interpretation,
+execution boundaries, replies, and performance evidence. A resident CPU Qwen
+interpreter chooses one operation from the private home-config catalog. Existing
+native adapters validate and execute it. The stable Codex Python SDK remains the
+runtime for general tasks and fallback. There is no additional agent framework.
 
 ## Components and ownership
 
 ```mermaid
 flowchart TD
-    Telegram[Telegram owner message] --> Intake[Authenticate and deduplicate]
-    SSH[Authenticated local or SSH client] --> Intake
-    Intake --> Ledger[(Durable job and attempt ledger)]
-    Intake --> Wake[Immediate dispatcher wake]
-    Wake --> Router[Capability router]
-    Catalog[Private home-config capability catalog] --> Router
-    Router --> Qwen[Resident CPU Qwen interpreter]
-    Qwen --> Validate[Validate intent and resolve target]
-    Validate -->|Supported and unambiguous| Executor[Allowlisted home-config executor]
-    Validate -->|Ambiguous| Clarify[Clarification result]
-    Router -->|Complex or local path unavailable| Codex[Codex runtime]
-    Validate -->|Unsupported interpretation| Codex
-    Executor --> Verify[Readback and outcome classification]
-    Verify -->|Confirmed| Result[Persist result]
-    Verify -->|Failed or uncertain| Recovery[Bounded recovery policy]
-    Recovery -->|Proven not sent| Codex
-    Recovery -->|Possible side effect| Diagnosis[Restricted diagnosis or deterministic readback]
-    Diagnosis --> Result
-    Codex -->|Routine home-control proposal| Validate
-    Codex -->|General task result| Result
+    Telegram[Owner Telegram update] --> Auth[Authenticate and deduplicate]
+    SSH[Authenticated bridge client] --> Socket[Private Unix socket]
+    Auth --> Queue[(SQLite jobs and events)]
+    Socket --> Queue
+    Queue --> Wake[Immediate worker wake]
+    Wake --> Router[Route against private catalog]
+    Router --> Qwen[Resident CPU Qwen]
+    Qwen --> Validate[Validate operation and explicit arguments]
+    Validate --> Adapter[Allowlisted home-config adapter]
+    Adapter --> CLI[Existing native device CLI]
+    CLI --> Verify[Readback verification]
+    Verify --> Result[Commit terminal result and outbox]
+    Router -->|General or multiple targets| Codex[Existing Codex SDK runtime]
+    Qwen -->|Unavailable or timed out| Codex
+    Adapter -->|Proven not sent, runtime failure| Codex
+    Adapter -->|Possible side effect| ReadOnly[Deterministic read-only reconciliation]
+    ReadOnly --> Result
+    Validate -->|Ambiguous or invalid| Clarify[Clarification]
     Clarify --> Result
-    Result --> Ledger
-    Result --> Outbox[Reply outbox]
-    Outbox --> TelegramReply[Telegram reply or SSH response]
+    Codex --> Result
+    Result --> Queue
+    Result --> Delivery[Independent reply delivery]
+    Delivery --> TelegramAPI[Telegram API]
+    Result --> Socket
 ```
 
-| Owner | Responsibilities |
+| Owner | Responsibility |
 | --- | --- |
-| Public home-agent repository | Routing, job/attempt state, transport wakeups, model lifecycle, fallback policy, bounded context, metrics, synthetic tests, generic installation |
-| Private home-config repository | Installed services, device aliases, native configurations, action adapters, parameter limits, outcome verification, deployment choices |
-| Device CLIs | Vendor/device communication and their existing native control behavior |
-| Qwen | Interpret a request into a constrained intent; no credentials, shell, or direct device access |
-| Codex | General requests and recovery appropriate to the recorded execution phase |
+| Public home-agent | Authentication, durable jobs, wakeups, Qwen selection, validation, fallback, dispatch evidence, outbox, metrics, model installer |
+| Private home-config | Inventory, aliases, native argument constraints, fixed adapter invocation, verification and household deployment |
+| Native CLIs | Existing vendor/device protocols and credentials |
+| Qwen | Select a schema-constrained operation ID; no tools or credentials |
+| Codex | Existing trusted general-agent path, including its existing shell/sudo authority |
 
-Build the private catalog from home-config's existing inventory parser and adapter
-contracts. Do not create a second service manifest or a replacement universal
-device schema. An intent is a routing envelope whose arguments retain the relevant
-service's native meanings. The executor exposes only specific named operations,
-never arbitrary command strings. Reuse existing adapter logic rather than adding a
-second implementation of the same device behavior in Home Agent.
+The private catalog is generated using home-config's `bin/inventory` parser and
+existing panel adapters. It is a cached routing projection, not a replacement
+service manifest or universal device configuration. Refresh and restart routing
+when configuration changes. Both sides check a catalog version before execution.
+The model service runs as `home-agent-model`, separate from the credential-bearing
+adapter account. It binds only to loopback and has no device tools.
 
-Catalog entries contain stable target IDs, explicit aliases, supported actions,
-argument types/units/ranges, and verification semantics. They exclude secrets and
-are versioned. Cache the catalog; refresh it on a configuration-change event or
-startup, not by rediscovering every device for every message. Revalidate against
-the current catalog immediately before execution if its version has changed.
+## Local interpretation contract
 
-## Interpretation and validation
+Catalog families are switches (on/off/status), climate (heat/cool/off/setpoint/status),
+pool (pump/cleaner/heating/status), hot tub (setpoint/status), and gates (open/close/status).
+Only configured operations in the inventory action allowlist become capabilities.
 
-Qwen returns one of three schema-constrained decisions:
+1. Match explicit device aliases with word boundaries. Prefer a longer alias over
+   a shorter overlapping alias, but retain distinct targets elsewhere in the message.
+2. Multiple targets or compound requests use Codex before any local dispatch.
+3. Qwen returns only `{"op": N}`: a candidate operation number, `0` for clarification,
+   or `-1` for complex work. Schema-constrained output is limited to 12 tokens.
+4. Code extracts an explicit numeric temperature or named heating mode. Validate
+   the native unit, bounds and whole-degree requirement; never invent a setpoint.
+   This first release supports Fahrenheit locally; Celsius requests ask for clarification.
+5. Reject negated, conditional, explanatory, and deferred local writes. Missing or
+   invalid arguments produce clarification, not a fallback that bypasses validation.
+6. Invoke a fixed executable argv with JSON over stdin. Model output never becomes
+   shell text, an executable path, or an arbitrary tool name.
 
-- `intent`: service, target, operation, and service-specific arguments;
-- `clarify`: missing/ambiguous information and a small set of valid choices;
-- `fallback`: unsupported request and a routing reason.
+No local pronoun or conversation-memory inference is enabled. Requests need an
+explicit device alias; broader conversation uses the existing Codex thread.
+Follow-up/context sharing and richer language coverage remain future work.
+The general Codex path retains its prior trusted execution contract: it does **not**
+currently route all shell actions back through the local validator. Its device
+issue timings and independent readback cannot be inferred from its final prose.
 
-Use non-thinking inference with a short cached instruction prefix and a bounded
-request/context budget. Start from the measured 2B model, but re-evaluate accuracy
-and latency with the larger action catalog. A model's confidence statement never
-authorizes an operation.
-
-Validation checks the decision schema, configured service/target, allowed operation,
-argument types, units, limits, and target resolution. The current experiment's
-explicit-alias check becomes one part of this validation, not the whole policy.
-Unknown targets or missing units that cannot be resolved from documented defaults
-require clarification. Known invalid values cannot bypass validation by falling
-back to Codex. Routine home-control proposals from Codex use the same executor and
-validation rules. The routine fallback profile produces proposals through this
-executor; it must not expose a second shell-based path around the policy. Keep
-that profile distinct from explicit administrative requests with normal Codex
-host authority.
-
-Obvious administrative requests can go directly to Codex. For other requests,
-allow one bounded Qwen attempt followed by at most one automatic Codex handoff;
-never bounce between engines indefinitely. The local inference deadline is
-configurable and tuned from measurements. Timeouts cancel/discard that generation
-so it cannot later dispatch a command after fallback has begun.
-
-## Durable job lifecycle
+## Queue and execution state
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Queued: Authorized submission committed
-    Queued --> Interpreting: Claim oldest eligible job
-    Interpreting --> Validating: Qwen proposes intent
-    Interpreting --> Codex: Unsupported, unavailable, or timeout
-    Validating --> Executing: Valid action
-    Validating --> Clarification: Ambiguous or invalid arguments
-    Validating --> Codex: Unsupported capability
-    Executing --> Verifying: Device attempt started
-    Executing --> Codex: Proven not dispatched
-    Verifying --> ResultRecorded: Confirmed outcome
-    Verifying --> Recovery: Failure or uncertainty
-    Recovery --> ResultRecorded: Readback resolves outcome
-    Recovery --> Diagnosis: Cannot establish outcome
-    Diagnosis --> ResultRecorded: Explanation or owner decision needed
-    Codex --> ResultRecorded: Result, failure, or uncertainty
-    Clarification --> ResultRecorded: Question persisted
-    Queued --> Cancelled: Owner cancellation
-    Interpreting --> Cancelled: Stop before dispatch
-    Validating --> Cancelled: Stop before dispatch
-    Executing --> Recovery: Stop after possible dispatch
-    Verifying --> Recovery: Stop after possible dispatch
-    Cancelled --> ResultRecorded: Cancellation persisted
-    ResultRecorded --> [*]
+    [*] --> Queued: Authenticate, persist, wake
+    Queued --> Running: Single FIFO worker claims job
+    Running --> Interpreting: Local candidate
+    Running --> Codex: General request
+    Interpreting --> Validating: Valid constrained result
+    Interpreting --> Codex: Timeout, model failure, complex result
+    Validating --> Completed: Clarification, no write
+    Validating --> Adapter: Valid operation
+    Adapter --> DispatchRecorded: Adapter asks permission
+    DispatchRecorded --> Issued: Commit boundary, grant GO, launch CLI
+    Issued --> Completed: Verified native readback
+    Issued --> Uncertain: Error or unconfirmed readback
+    Adapter --> Codex: Proven not sent, runtime failure
+    Adapter --> Completed: Validation refusal, clarify
+    Uncertain --> ReadOnly: Observe only, never repeat mutation
+    ReadOnly --> Uncertain: Persist observation with uncertain result
+    Codex --> Completed: Runtime completed
+    Codex --> Failed: Failure before turn started
+    Codex --> Uncertain: Failure after turn started
+    Running --> Uncertain: Service restarted
+    Completed --> [*]
+    Failed --> [*]
+    Uncertain --> [*]
 ```
 
-These are logical phases, not claims about the current SQLite schema. Retain the
-existing job statuses (`queued`, `running`, `completed`, `failed`, `cancelled`,
-`uncertain`) and add explicit routing/attempt records in a reviewed migration.
-`Interpreting` through recovery are phases of a running job. Persisting the final
-result sets the appropriate terminal status; delivery is tracked independently.
-
-Clarification completes the current job with a question and records a bounded,
-expiring pending question. It must not block the FIFO while waiting for the user.
-The answer is a new authenticated job linked to that question and is revalidated.
-A stale or conflicting answer cannot silently resume an old device action.
-
-Store the original request, source identity/idempotency key, chosen engine,
-catalog/model/prompt versions, intent, validation outcome, attempt number,
-execution boundary, structured device outcome, result, and delivery state.
-Preserve previous attempts when a user explicitly requests a retry.
-
-## Side effects, recovery, and fallback
-
-```mermaid
-stateDiagram-v2
-    [*] --> Planned: Validated operation recorded
-    Planned --> Dispatching: Persist boundary before external call
-    Planned --> NotSent: Cancelled before dispatch
-    Dispatching --> NotSent: Adapter proves no command was sent
-    Dispatching --> Confirmed: Authoritative readback matches
-    Dispatching --> Uncertain: Timeout, disconnect, crash, or unknown outcome
-    Uncertain --> ReadOnlyRecovery: Inspect recorded result and fresh status
-    ReadOnlyRecovery --> Confirmed: Requested condition is established
-    ReadOnlyRecovery --> NeedsOwner: Outcome unresolved or repair requires a write
-    NotSent --> [*]
-    Confirmed --> [*]
-    NeedsOwner --> [*]
-```
-
-Persist the dispatch boundary before crossing it. A crash between that write and
-the external call is conservatively uncertain; software cannot guarantee exactly
-once physical execution across this boundary. An exception, nonzero CLI exit, or
-model timeout alone is not proof that no device command was sent.
-
-| Evidence | Allowed next step |
-| --- | --- |
-| Local model unavailable, invalid output, or timeout before execution | Codex gets the original request and routing reason |
-| Ambiguous request | Ask for clarification; neither engine invents the target |
-| Adapter proves preflight refusal/no dispatch | Codex may diagnose and propose a validated new attempt |
-| Confirmed desired state | Record success; do not execute again |
-| Possible dispatch with missing/mismatched readback | Read-only reconciliation; no automatic mutation replay |
-| Completed action but lost Telegram reply | Retry delivery only |
-| Both engines unavailable | Preserve the job/outcome and report a clear unavailable/failed state |
-
-The same job ID accompanies the handoff. Codex receives the original request,
-validated intent, exact attempts already made, structured errors, and readback.
-Status observations distinguish current state from proof of what caused that
-state. Readback indicating that a gate is still moving is not a failed command
-and must not trigger another open/close attempt.
-
-**Diagnosis-only recovery must be enforced outside the model.** The existing
-unrestricted Codex runtime has shell access and passwordless sudo; a prompt asking
-it to avoid writes does not constrain those powers. Implement a separate recovery
-execution profile exposing only allowlisted reads, with no general shell,
-mutating tool, writable device credentials, or privilege escalation. If the
-available runtime cannot enforce that profile, keep automatic uncertain-action
-recovery in deterministic readback code and ask the owner before further writes.
-Do not reuse the unrestricted runtime for this purpose.
-
-Explicit owner-authorized administration retains the existing Codex authority.
-Its failure after dispatch also remains uncertain and must not replay. A model
-error or fallback is not authorization to alter configuration or install software.
-Cancellation prevents new execution and never automatically hands an interrupted
-request to an unrestricted engine. Read-only reconciliation may explain a command
-that was already sent.
-
-## Immediate wakeup and independent delivery
+A local mutation uses a framed handshake:
 
 ```mermaid
 sequenceDiagram
-    participant T as Telegram or SSH
-    participant H as Home Agent intake
-    participant DB as Durable ledger
     participant W as Worker
-    participant Q as Qwen
-    participant E as Home-config executor
-    participant N as Reply notifier
-    T->>H: Authorized request with stable identity
-    H->>DB: Commit deduplicated job
-    H->>W: Signal ready work immediately
-    H-->>T: Submission accepted without waiting for Telegram notification
-    W->>DB: Claim job
-    W->>Q: Bounded interpretation
-    Q-->>W: Structured intent
-    W->>DB: Record validated plan and dispatch boundary
-    W->>E: Execute allowlisted operation
-    E-->>W: Verified result or explicit uncertainty
-    W->>DB: Atomically record result and pending reply
-    W->>N: Signal pending reply
-    N-->>T: Result
+    participant DB as SQLite ledger
+    participant A as Private adapter
+    participant C as Native CLI
+    W->>A: Validated capability and catalog version
+    A->>A: Native validation and prerequisite reads
+    A->>W: dispatch_ready
+    W->>W: Check cancellation and shutdown
+    W->>DB: Commit action_dispatch_started
+    W->>A: GO
+    A->>C: Launch allowlisted argv
+    A->>W: driver_issued with host monotonic time
+    C-->>A: Native result / verification
+    A-->>W: confirmed / uncertain / not_sent
+    W->>DB: Commit terminal job and pending reply together
 ```
 
-All producers submit through the job-owning daemon. Telegram uses its in-process
-submission API; SSH and heartbeat/timer clients use an authenticated private Unix
-socket. Producers must not write directly to SQLite and depend on polling to
-notice their inserts. Commit and signal in the owning process before the next
-asynchronous yield; on daemon restart, drain persisted eligible work before
-blocking. This covers a crash after commit but before notification.
+`action_dispatch_started` means a side effect may occur; `driver_issued` means the
+CLI process was actually launched. Neither means hardware acknowledgement.
+After possible dispatch there is no unrestricted Codex fallback or automatic
+mutation replay. Reconciliation uses the adapter's enforced read-only path and
+cannot receive GO permission. It reports the current observation but conservatively
+leaves the original result uncertain. Restarted running jobs also stay uncertain;
+manual `/retry` remains an explicit owner action. Queued jobs resume on startup.
 
-Use stable submission IDs so a client can resolve a lost submission acknowledgement
-without creating another job. The SSH client waits for a pushed completion or
-subscribes to the existing job after reconnecting; it does not poll SQLite.
+The single worker preserves order across local and Codex requests. Long Codex
+turns and slow physical devices can block subsequent commands; measure queue wait
+rather than silently reordering work. Device preflight reads also count toward
+issue latency. Inference has a 1.5-second timeout; three failures open a request-driven
+30-second circuit breaker. No late inference result can dispatch after fallback.
+Codex authentication failure does not block eligible local requests.
 
-Drain ready jobs, then wait for an event or the next actual scheduled deadline.
-Wake on submission, shutdown, configuration/authentication changes, and scheduled
-retry deadlines. Arm one timer for the next due job; do not retain a periodic
-queue sweep. Telegram long-polling may remain: an arriving update completes the
-pending request immediately and adds no deliberate queue interval.
+## Wakeups and reply delivery
 
-Move `Queued`/`Working` notifications off the execution path. A serialized per-job
-notifier sends progress only after a configurable delay if no terminal result is
-ready. It cancels stale progress and handles message IDs so an acknowledgement
-cannot overwrite a final result. Notification failures never block device work.
+Telegram enqueues and wakes in the daemon without awaiting a Telegram API call.
+Bridge clients use a mode-0600 Unix socket with stable request IDs; retrying the
+same ID retrieves the same job. The daemon persists and wakes before acknowledging
+submission. CLI heartbeat producers also submit through this socket. A socket lock
+prevents a second daemon from unlinking an active endpoint. Deployment controls
+wake the worker after changing pause state.
+
+In routing mode, an idle worker waits on events indefinitely. A queued retry uses
+its exact due time as a timer. There is no periodic idle queue polling. Telegram's
+normal server-side long polling remains the network transport and is unrelated
+to local queue polling. Legacy operation without `routing_config` retains its
+prior behavior for compatibility.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> ReplyPending: Result and outbox entry committed
-    ReplyPending --> Sending: Delivery wake or scheduled retry
-    Sending --> Delivered: Telegram or SSH acknowledges
-    Sending --> ReplyPending: Retryable transport failure
-    Sending --> DeliveryUncertain: Response lost after possible delivery
-    DeliveryUncertain --> Delivered: Reconcile when transport permits
-    DeliveryUncertain --> ReplyPending: Bounded notification retry policy
-    Sending --> DeliveryFailed: Permanent failure or retry budget exhausted
+    [*] --> Pending: Commit result and reply atomically
+    Pending --> Sending: Independent delivery task
+    Sending --> Delivered: Telegram API acknowledges
+    Sending --> Pending: Persist backoff and retry
+    Sending --> Exhausted: Five failed attempts
     Delivered --> [*]
-    DeliveryFailed --> [*]
+    Exhausted --> [*]
 ```
 
-Outbox failure/restart never transitions back to device execution. Prefer editing
-an existing acknowledged Telegram message when available. Telegram send timeouts
-can make delivery uncertain; do not promise exactly-once notification delivery.
+Delivery failures never rerun the device job. Retry state survives restart.
+Telegram may have delivered a message whose API acknowledgement was lost, so
+notifications are not promised exactly once. Exhausted deliveries remain in the
+outbox and event log for inspection. Fast-path messages receive a final reply
+without an extra queued/working round trip. Slow jobs can be inspected with
+`/status`; a delayed progress notification is not implemented in this release.
 
-## Context, model health, and availability
+## Performance evidence and goals
 
-Keep a small persisted context per authorized conversation: recent resolved target,
-last verified actions, and pending clarification. Include the relevant projection
-in both Qwen interpretation and Codex handoff. Resolve pronouns only when a unique,
-recent target exists. Treat old status as context, not current device verification.
-`/new` clears conversational context when safe without deleting execution history.
+The objectives are **greater than 99% verified success** for eligible basic controls
+and **less than 1,000 ms from daemon receipt to command issue**. Durable acceptance
+is measured separately and should also remain below 1,000 ms. Verified completion
+and Telegram delivery remain separate measurements; physical motion is not expected
+to finish within a second. These are targets, not a claim established by deployment.
 
-Keep Qwen resident, isolate inference from credentials/device execution, and pin
-runtime/model artifacts. Use request-driven health and a bounded circuit breaker:
-repeated local failures temporarily route to Codex; after cooldown, allow one probe
-or a single scheduled readiness attempt. Do not add periodic health polling to the
-command path. Model downtime and Codex authentication are separate health states:
-expired Codex login must not suspend otherwise eligible local home controls.
+| Field/event | Meaning |
+| --- | --- |
+| `performance_accepted.accept_ms` | Host receipt to durable queue acceptance |
+| `queue_ms` | Receipt to worker claim, including acceptance |
+| `inference_ms`, `interpreted.decision.model_timings` | Total local HTTP inference; llama prompt/cache/generation timings |
+| `validated` | Argument validation finished |
+| `action_dispatch_started` | Durable possible-side-effect boundary before GO |
+| `driver_issue_ms` | Host receipt to actual native CLI process launch |
+| `driver_issue_from_claim_ms` | Claim to CLI launch, excluding queue backlog |
+| `device_ms` | Adapter lifetime, including native prerequisite reads and verification |
+| `completed_ms` | Receipt to terminal processing completion; excludes reply delivery |
+| `performance_delivery.delivery_ms` | Telegram API request duration |
+| `performance_delivery.receipt_to_reply_ms` | Receipt to Telegram API acknowledgement |
 
-If the local path fails, use Codex. If Codex is unavailable too, do not hang or
-silently retry uncertain work. Expose the job state and retain its evidence.
-A job requiring an unavailable engine gets a bounded, explicit failure/deferred
-result rather than holding the dispatcher indefinitely; do not globally pause
-all jobs on a Codex authentication flag.
-Model startup/loading is measured separately from a warm request.
+Events carry UTC timestamps and same-host monotonic durations, boot ID, job ID,
+attempt, engine, model, catalog version, release, outcome and fallback reason.
+Model cold/prompt-cache behavior is available in native inference timings. Boot
+changes invalidate receipt-relative monotonic timings. Logs contain structured
+performance summaries in the service journal and detailed events in the existing
+private SQLite interaction ledger. Summaries exclude prompts and credentials.
+Never publish raw logs, catalogs, or transcripts to the public repository.
 
-## Outcomes, latency, and evidence
+```sh
+sudo -u home-agent /opt/home-agent/current/venv/bin/agentctl performance \
+  --since 2026-09-20 --source telegram
+sudo -u home-agent /opt/home-agent/current/venv/bin/agentctl performance \
+  --since 2026-09-20 --source benchmark
+journalctl -u home-agent.service --grep='performance job_id='
+```
 
-Replies describe what the adapter actually established. A confirmed setpoint is
-not a claim that water/air has reached that temperature. A gate command accepted
-is distinct from a gate fully open. Reuse existing adapter verification and
-represent accepted, confirmed, failed-before-send, and uncertain outcomes
-explicitly. Do not downgrade verification just to meet the latency target.
+Reports separate source and capability/engine, use the latest attempt per job,
+and show success counts, latency sample counts, p50/p95/max, clarification and
+fallback counts. Clarifications are excluded from actionable success but displayed
+separately. Unknown/crashed outcomes and missing timings are not passes. Codex
+completion without independent device verification does not count as verified
+success. Read-only observations do not enter mutation issue-latency denominators.
+Raw attempts remain available so explicit retries are not hidden.
 
-The target is approximately two seconds for an available worker handling a warm,
-routine local request through verified completion. The CPU experiment measured
-roughly one second for a single switch, not the expanded catalog or Telegram.
-Physical movement, slow controllers, FIFO wait, and Codex fallback can take longer.
+Report language selection accuracy separately from execution success. Review
+clarification/fallback rates alongside reliability to avoid making success look
+better by refusing supported requests. Use both repeated warm commands and mixed
+capabilities, and separate idle-worker trials from queue contention. Telegram
+message dates cannot measure millisecond phone-to-host latency. Small samples
+cannot substantiate >99% reliability: even 100/100 successes are insufficient to
+establish that threshold with a one-sided 95% lower confidence bound.
 
-Record monotonic durations within each process and UTC timestamps for correlation:
-receive, persist, claim, inference, validation, dispatch, device readback, result
-commit, and reply delivery. Report queue wait separately, along with engine,
-fallback reason, model/catalog versions, success rate, p50/p95, and cold/warm state.
-Telegram message timestamps do not provide a millisecond-accurate measurement of
-phone-to-bot delivery. Use host-receive-to-result and host-receive-to-Telegram-API
-ack as separate metrics. Keep raw interaction evidence private.
+## Installation, tests, and rollback
 
-## Implementation sequence and acceptance
+The generic installer `scripts/install-local-model.py` verifies the pinned runtime
+and model checksums and installs the isolated, boot-enabled system service.
+It may reuse verified artifacts from the experiment cache. The private repository
+provides `bin/install-home-agent-router` for catalog/adapters and routing configuration.
+Stop the obsolete experimental user services before starting the system model.
+The regular public release remains the source of the Telegram worker code.
 
-1. Add the catalog/adapter contract in home-config and routing configuration in
-   Home Agent. Keep existing native device configuration and manifest ownership.
-2. Generalize persisted attempt/dispatch state beyond `codex_started`; add the
-   result outbox, recovery migration, daemon submission API, and immediate wakeups.
-3. Add Qwen interpretation, validation, bounded context, deadlines, and engine
-   health separation. Preserve the Codex SDK path and existing owner checks.
-4. Implement pre-dispatch fallback and enforced read-only reconciliation.
-5. Run observation mode: classify alongside the existing path, record proposed
-   decisions, and never execute a second action. Use synthetic/held-out language
-   tests before evaluating private real-message evidence.
-6. Enable tested local capabilities incrementally; keep unvalidated operations on
-   Codex. Install supported services at boot through the normal release/deployment
-   workflow after validation, replacing the separate experimental worker.
+Tests cover real Unix-socket wakeups and idempotent submission, authenticated
+Telegram intake and asynchronous delivery, model failure, Codex auth isolation,
+pre-dispatch guards, uncertain read-only recovery, restart evidence, and durable
+outbox retry. home-config tests run the framed adapter against substitute native
+CLIs and verify permission, dispatch and readback boundaries. Live mutation trials
+are restricted to owner-authorized devices; do not use gates/heaters merely to
+increase sample counts.
 
-Required acceptance scenarios:
-
-- Unauthorized, edited, forwarded, or duplicate Telegram updates do not execute.
-- Explicit commands, aliases, units, negations, questions, conditional requests,
-  multi-action requests, unknown devices, and follow-up context route correctly.
-- No action is dispatched after its inference deadline, cancellation, or fallback.
-- Every producer wakes an idle worker; concurrent commit/wait and restart races
-  lose no jobs, and no periodic idle job polling remains.
-- A model outage routes promptly to Codex; Codex login failure leaves local
-  capabilities usable. Malformed Qwen output never reaches device execution.
-- Fault injection before/after dispatch, after result commit, and during reply
-  delivery preserves no-replay behavior and reconstructs pending notifications.
-- Recovery cannot invoke mutating tools or acquire the normal Codex shell/sudo
-  authority. Validation failures cannot be bypassed by fallback.
-- Ordered actions remain ordered during fallback. Clarification does not hold the
-  queue open. Notification failures and slow Telegram responses do not delay work.
-- Adapter outcomes are truthful, including ongoing physical motion and uncertain
-  readback. Language accuracy is reported separately from execution guard accuracy.
-- Measure per-capability warm latency and queue contention with a meaningful sample;
-  ten successful trials alone do not establish p95 reliability. Live device trials
-  require explicit owner authorization; automated tests use substitutes.
-
-Provide `codex-only`, `observe`, and `qwen-first` routing modes. Roll back new routing
-by configuration without deleting jobs or results. Drain active attempts before
-code/schema rollback; an older binary must not open an incompatible database.
-Preserve uncertain attempts for reconciliation. Keep public source/tests free of
-private catalogs, credentials, logs, and conversation transcripts.
-
-The [behavior contract](../BEHAVIOR.md) describes current production behavior.
-Update it alongside the implementation and its tests, rather than presenting this
-design as already deployed. The existing Codex-only runtime guideline is extended
-only for the explicitly approved local interpreter; Codex remains the general
-agent runtime and no replacement framework is introduced.
+Use `mode: "codex-only"` and restart to disable local routing while retaining the
+new queue and outbox. `observe` records eligible proposals and then uses Codex
+without local dispatch. Drain active work before binary rollback, retain a database
+backup, and preserve uncertainty evidence. The schema migration is additive; do
+not delete jobs or outbox rows as a rollback mechanism.

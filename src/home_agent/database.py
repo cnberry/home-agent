@@ -52,9 +52,10 @@ def utc_now() -> str:
 
 
 class Database:
-    def __init__(self, path: Path, max_queue: int = 20) -> None:
+    def __init__(self, path: Path, max_queue: int = 20, *, durable_replies: bool = False) -> None:
         self.path = path
         self.max_queue = max_queue
+        self.durable_replies = durable_replies
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -121,7 +122,17 @@ class Database:
             columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
             if "response" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN response TEXT")
+            if "submission_key" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN submission_key TEXT")
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS jobs_submission_key ON jobs(submission_key)"
+            )
             db.executescript("""
+                CREATE TABLE IF NOT EXISTS outbox (
+                    job_id INTEGER PRIMARY KEY REFERENCES jobs(id),
+                    text TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                    due_at REAL NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0
+                );
                 CREATE TABLE IF NOT EXISTS interaction_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     occurred_at TEXT NOT NULL,
@@ -200,10 +211,17 @@ class Database:
         telegram_chat_id: int | None = None,
         telegram_message_id: int | None = None,
         deduplicate_kind: bool = False,
+        submission_key: str | None = None,
     ) -> Job | None:
         now = utc_now()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if submission_key is not None:
+                existing = db.execute(
+                    "SELECT id FROM jobs WHERE submission_key=?", (submission_key,)
+                ).fetchone()
+                if existing:
+                    return self.get_job(existing["id"], connection=db)
             if telegram_update_id is not None:
                 existing = db.execute(
                     "SELECT id FROM jobs WHERE telegram_update_id = ?", (telegram_update_id,)
@@ -251,6 +269,8 @@ class Database:
                     "INSERT OR IGNORE INTO updates(update_id, received_at) VALUES (?, ?)",
                     (telegram_update_id, now),
                 )
+            if submission_key is not None:
+                db.execute("UPDATE jobs SET submission_key=? WHERE id=?", (submission_key, job_id))
             self._job_event(db, "queued", job_id)
             return self.get_job(job_id, connection=db)
 
@@ -314,6 +334,27 @@ class Database:
                 (status, utc_now(), error, response, job_id),
             )
             self._job_event(db, status, job_id)
+            job = self.get_job(job_id, connection=db)
+            if (
+                self.durable_replies
+                and job
+                and (
+                    job.telegram_chat_id is not None
+                    or (
+                        job.kind == "heartbeat"
+                        and status == "completed"
+                        and (response or "").strip() != "NOOP"
+                    )
+                )
+            ):
+                text = (
+                    response if status == "completed" else f"Job #{job_id}: {status}: {error or ''}"
+                )
+                db.execute(
+                    "INSERT INTO outbox(job_id,text) VALUES(?,?) ON CONFLICT(job_id) DO "
+                    "UPDATE SET text=excluded.text,delivered=0,attempts=0,due_at=0",
+                    (job_id, text or "Done."),
+                )
 
     def requeue(self, job_id: int, delay_seconds: int, error: str) -> None:
         available = (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)).isoformat(
