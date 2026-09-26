@@ -34,7 +34,10 @@ class LocalRouter:
         matches = []
         for c in self.catalog["capabilities"]:
             for name in c["aliases"]:
-                for m in re.finditer(r"(?<!\w)" + re.escape(name) + r"(?!\w)", prompt, re.I):
+                compact_name = re.sub(r"[\s_-]+", "", name)
+                separator_tolerant = r"[\s_-]*".join(map(re.escape, compact_name))
+                pattern = r"(?<!\w)" + separator_tolerant + r"(?!\w)"
+                for m in re.finditer(pattern, prompt, re.I):
                     matches.append((m.start(), m.end(), c))
         result = {}
         for start, end, c in matches:

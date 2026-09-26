@@ -13,6 +13,7 @@ from home_agent.control import ControlServer, submit
 from home_agent.database import Database
 from home_agent.outbox import Outbox
 from home_agent.performance import Performance, accepted, report
+from home_agent.routing import LocalRouter
 from home_agent.worker import Worker
 
 
@@ -45,6 +46,29 @@ def fixture(tmp_path, adapter_body=""):
     db = Database(tmp_path / "db.sqlite3", durable_replies=True)
     db.initialize()
     return cfg, db
+
+
+@pytest.mark.parametrize(
+    ("prompt", "matched"),
+    [
+        ("Turn on firepit lights", True),
+        ("Turn on fire pit lights", True),
+        ("Turn on fire-pit lights", True),
+        ("Turn on fireplace lights", False),
+    ],
+)
+def test_catalog_aliases_accept_separator_variants_without_guessing_targets(
+    tmp_path, prompt, matched
+):
+    cfg, _ = fixture(tmp_path)
+    catalog_path = tmp_path / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["capabilities"][0]["aliases"] = ["firepit lights"]
+    catalog_path.write_text(json.dumps(catalog))
+
+    candidates = LocalRouter(cfg).candidates(prompt)
+
+    assert ([candidate["id"] for candidate in candidates] == ["switch:test:on"]) is matched
 
 
 @pytest.mark.asyncio
