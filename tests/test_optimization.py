@@ -186,3 +186,24 @@ async def test_failed_review_is_recorded_and_not_replayed(
     records = list((settings.data_dir / "optimization").glob("*/result.json"))
     assert len(records) == 1
     assert json.loads(records[0].read_text())["status"] == "failed_or_uncertain"
+
+
+def test_review_exports_old_unresolved_learning_cases(settings, tmp_path):
+    db = Database(settings.database_path)
+    db.initialize()
+    job = db.enqueue("telegram", "synthetic garden lights")
+    with db.connect() as conn:
+        conn.execute("UPDATE jobs SET created_at='2000-01-01T00:00:00+00:00'")
+        conn.execute(
+            "INSERT INTO local_reviews(job_id,attempt,evidence,status) "
+            "VALUES(?,1,'{}','needs_attention')",
+            (job.id,),
+        )
+    directory = tmp_path / "report"
+    directory.mkdir()
+    export_interactions(settings, directory)
+    rows = [
+        json.loads(line) for line in (directory / "local-reviews.jsonl").read_text().splitlines()
+    ]
+    assert rows[0]["job_id"] == job.id and rows[0]["status"] == "needs_attention"
+    assert (directory / "local-reviews.jsonl").stat().st_mode & 0o777 == 0o600

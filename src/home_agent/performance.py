@@ -52,6 +52,7 @@ class Performance:
             "engine": "codex",
             "eligible": False,
             "release": os.environ.get("HOME_AGENT_REVISION", __version__),
+            "runtime_version": __version__,
             "boot_id": BOOT_ID,
         }
         with database.connect() as db:
@@ -126,11 +127,19 @@ def report(
             "AND e.occurred_at>=? ORDER BY e.id",
             (since,),
         ).fetchall()
+        reviews = db.execute("SELECT job_id,attempt,status,result FROM local_reviews").fetchall()
     # Retry attempts remain in raw evidence; job-level report uses the latest outcome.
     latest: dict[int, dict[str, Any]] = {}
     for row in rows:
         latest.setdefault(row["job_id"], {"eligible": True}).update(json.loads(row["details"]))
         latest[row["job_id"]]["status"] = row["status"]
+    for review in reviews:
+        value = latest.get(review["job_id"])
+        if value and value.get("attempt") == review["attempt"]:
+            verdict = json.loads(review["result"]).get("verdict") if review["result"] else "pending"
+            value["review_verdict"] = verdict
+            if verdict == "incorrect":
+                value["eligible"] = True
     values = [r for r in latest.values() if source is None or r.get("source") == source]
     groups: dict[str, Any] = {}
     for key in sorted({f"{r.get('engine')}/{r.get('capability', 'general')}" for r in values}):
@@ -142,7 +151,9 @@ def report(
             and r["status"] in ("completed", "failed", "uncertain", "cancelled")
         ]
         success = sum(
-            r["status"] == "completed" and r.get("outcome") in ("confirmed", "observed")
+            r["status"] == "completed"
+            and r.get("outcome") in ("confirmed", "observed")
+            and r.get("review_verdict") not in ("incorrect", "uncertain")
             for r in terminal
         )
         issue = sorted(
@@ -153,6 +164,10 @@ def report(
         commands = [r for r in terminal if r.get("mutation") is True]
         groups[key] = {
             "jobs": len(group),
+            "review_incorrect": sum(r.get("review_verdict") == "incorrect" for r in group),
+            "review_pending": sum(r.get("review_verdict") == "pending" for r in group),
+            "review_uncertain": sum(r.get("review_verdict") == "uncertain" for r in group),
+            "review_approved": sum(r.get("review_verdict") == "correct" for r in group),
             "eligible_terminal": len(terminal),
             "successes": success,
             "success_rate": success / len(terminal) if terminal else None,
@@ -183,5 +198,7 @@ def report(
         "incomplete": sum(r["status"] in ("queued", "running") for r in values),
         "missing_final_evidence": sum("outcome" not in r for r in values),
         "note": "Driver issue means CLI process launched, not hardware "
-        "acknowledgement. Missing timings are not passes. Small samples do not establish the SLO.",
+        "acknowledgement. Pending-review successes are provisional. "
+        "Missing timings are not passes. "
+        "Small samples do not establish the SLO.",
     }

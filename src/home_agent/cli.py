@@ -308,11 +308,46 @@ def deployment_pause(args: argparse.Namespace) -> int:
     return 0
 
 
+def supervision_status(args: argparse.Namespace) -> int:
+    settings = _settings(args)
+    database = Database(settings.database_path)
+    database.initialize()
+    with database.connect() as db:
+        states = {
+            r[0]: r[1]
+            for r in db.execute("SELECT status,COUNT(*) FROM local_reviews GROUP BY status")
+        }
+        outcomes = [
+            json.loads(r[0])
+            for r in db.execute("SELECT result FROM local_reviews WHERE result IS NOT NULL")
+        ]
+        active = db.execute("SELECT COUNT(*) FROM routing_examples WHERE active=1").fetchone()[0]
+    print(
+        json.dumps(
+            {
+                "reviews": states,
+                "active_examples": active,
+                "incorrect": sum(r.get("verdict") == "incorrect" for r in outcomes),
+                "uncertain": sum(r.get("verdict") == "uncertain" for r in outcomes),
+                "learning": {
+                    key: sum(r.get("learning") == key for r in outcomes)
+                    for key in sorted({r.get("learning", "unknown") for r in outcomes})
+                },
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentctl")
     parser.add_argument("--config", help="configuration path")
     parser.add_argument("--verbose", action="store_true")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    supervision = subparsers.add_parser("supervision", help="show durable local review health")
+    supervision.set_defaults(func=supervision_status)
 
     optimizer = subparsers.add_parser("optimize", help="run the daily improvement review")
     optimizer.add_argument("--report-only", action="store_true")

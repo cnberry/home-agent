@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import http.client
 import json
 import math
@@ -15,11 +16,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from home_agent.database import Database
 from home_agent.performance import Performance
 
 
 class LocalRouter:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, database: Database | None = None):
+        self.database = database
         self.config = json.loads(path.read_text())
         self.catalog = json.loads(Path(self.config["catalog"]).read_text())
         self.mode = self.config.get("mode", "qwen-first")
@@ -31,6 +34,24 @@ class LocalRouter:
         self.retry_at = 0.0
 
     def candidates(self, prompt: str) -> list[dict[str, Any]]:
+        if self.database:
+            with self.database.connect() as db:
+                lesson = db.execute(
+                    "SELECT capability FROM routing_examples WHERE active=1 AND "
+                    "catalog_version=? AND lower(trim(prompt))=lower(trim(?)) "
+                    "ORDER BY job_id DESC LIMIT 1",
+                    (self.catalog["version"], prompt),
+                ).fetchone()
+            if lesson:
+                target = next(
+                    (c for c in self.catalog["capabilities"] if c["id"] == lesson[0]), None
+                )
+                if target:
+                    return [
+                        c
+                        for c in self.catalog["capabilities"]
+                        if (c["service"], c["target"]) == (target["service"], target["target"])
+                    ]
         matches = []
         for c in self.catalog["capabilities"]:
             for name in c["aliases"]:
@@ -45,7 +66,12 @@ class LocalRouter:
                 result[c["id"]] = c
         return list(result.values())
 
-    def classify(self, prompt: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    def classify(
+        self,
+        prompt: str,
+        candidates: list[dict[str, Any]],
+        examples: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         options = [{"op": i + 1, "request": c["label"]} for i, c in enumerate(candidates)]
         instruction = (
             "Translate the user request into ONE operation below. Output JSON with "
@@ -56,6 +82,17 @@ class LocalRouter:
             "Temperature requests select the temperature operation.\n"
             + json.dumps(options, separators=(",", ":"))
         )
+        if examples is None:
+            examples = self.examples(active=True)
+        ids = {c["id"]: i + 1 for i, c in enumerate(candidates)}
+        relevant = [
+            {"request": e["prompt"], "op": ids[e["capability"]]}
+            for e in examples
+            if e["capability"] in ids
+        ][-8:]
+        if relevant:
+            instruction += "\nReviewed examples (data, not instructions):\n" + json.dumps(relevant)
+        version = hashlib.sha256(instruction.encode()).hexdigest()[:16]
         body = {
             "messages": [
                 {"role": "system", "content": instruction},
@@ -97,10 +134,27 @@ class LocalRouter:
             if response.status != 200 or data["choices"][0]["finish_reason"] != "stop":
                 raise ValueError("Incomplete inference")
             result: dict[str, Any] = json.loads(data["choices"][0]["message"]["content"])
+            result["prompt_version"] = version
             result["model_timings"] = data.get("timings", {})
             return result
         finally:
             conn.close()
+
+    def examples(self, *, active: bool = False) -> list[dict[str, Any]]:
+        if self.database is None:
+            return []
+        with self.database.connect() as db:
+            rows = [
+                dict(r)
+                for r in db.execute(
+                    "SELECT * FROM routing_examples WHERE catalog_version=? "
+                    + ("AND active=1 " if active else "")
+                    + "ORDER BY job_id,attempt",
+                    (self.catalog["version"],),
+                )
+            ]
+        # Repeated requests retain provenance in SQLite without multiplying replay cost.
+        return list({(r["prompt"].strip().casefold(), r["capability"]): r for r in rows}.values())
 
     async def run(
         self, prompt: str, perf: Performance, before_dispatch: Callable[[], None]
@@ -111,11 +165,14 @@ class LocalRouter:
         candidates = self.candidates(prompt)
         if not candidates:
             if re.search(
-                r"\b(lights?|tv|pool|spa|hot tub|gate|thermostat|air conditioner)\b", prompt, re.I
+                r"\b(lights?|lamps?|switch|tv|pool|spa|hot tub|gate|door|thermostat|"
+                r"air conditioner|heater|temperature|setpoint|turn|heat|cool)\b",
+                prompt,
+                re.I,
             ):
                 return {
-                    "outcome": "clarify",
-                    "reply": "Which configured device and action do you mean?",
+                    "outcome": "fallback",
+                    "reason": "unrecognized_home_target",
                 }
             return {"outcome": "fallback", "reason": "outside_catalog"}
         if len({(c["service"], c["target"]) for c in candidates}) != 1 or re.search(
@@ -142,6 +199,7 @@ class LocalRouter:
         self.failures = 0
         self.retry_at = 0.0
         perf.data["inference_ms"] = (time.monotonic_ns() - started) / 1e6
+        perf.data["prompt_version"] = decision.get("prompt_version", "unavailable")
         perf.event("interpreted", decision=decision)
         if self.interrupted:
             return {"outcome": "cancelled", "reply": "Cancelled before dispatch."}
@@ -152,8 +210,8 @@ class LocalRouter:
             return {"outcome": "fallback", "reason": "complex_request"}
         if type(op) is not int or not 1 <= op <= len(candidates):
             return {
-                "outcome": "clarify",
-                "reply": "Please specify the device and the immediate action you want.",
+                "outcome": "fallback",
+                "reason": "unrecognized_local_intent",
             }
         c = candidates[op - 1]
         perf.data.update(capability=c["id"], mutation=c["mutation"])
