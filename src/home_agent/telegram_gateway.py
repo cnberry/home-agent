@@ -23,6 +23,7 @@ from home_agent.database import Database, Job, QueueFullError
 from home_agent.health import enqueue_heartbeat
 from home_agent.outbox import Outbox
 from home_agent.performance import accepted
+from home_agent.supervision import Supervisor
 from home_agent.worker import AgentRuntime, Worker, safe_error
 
 LOGGER = logging.getLogger(__name__)
@@ -165,6 +166,8 @@ class TelegramGateway:
             if settings.routing_config
             else None
         )
+        self.supervisor: Supervisor | None = None
+        self.supervision_task: asyncio.Task[None] | None = None
         self.outbox_task: asyncio.Task[None] | None = None
         if self.control:
             self.notifier.outbox = Outbox(self.database, self.notifier._send_or_edit)
@@ -173,8 +176,36 @@ class TelegramGateway:
                 assert self.control is not None and self.notifier.outbox is not None
                 self.control.notify()
                 self.notifier.outbox.notify()
+                if self.supervisor:
+                    self.supervisor.notify()
 
             self.worker.on_result = changed
+            if (
+                codex is None
+                and self.worker.router
+                and self.worker.router.config.get("supervision_enabled", True)
+            ):
+                # Separate empty workspace prevents project instructions/extensions entering audits.
+                review_workspace = settings.data_dir / "supervision"
+                review_workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+                try:
+                    reviewer = CodexRuntime(
+                        review_workspace,
+                        settings.codex_home,
+                        timeout_seconds=60,
+                        model=settings.model,
+                        reasoning_effort="low",
+                        review_only=True,
+                    )
+                    assert self.worker.router is not None
+                    self.supervisor = Supervisor(
+                        self.database, self.worker.router, reviewer, self.notifier.outbox.notify
+                    )
+                except Exception as exc:
+                    LOGGER.error("Local reviewer unavailable: %s", type(exc).__name__)
+                    self.database.record_event(
+                        "local_reviewer_unavailable", details={"error_type": type(exc).__name__}
+                    )
         self.worker_task: asyncio.Task[None] | None = None
         self._register_handlers()
         self.application.post_init = self._post_init
@@ -267,6 +298,9 @@ class TelegramGateway:
             )
             assert self.notifier.outbox is not None
             self.outbox_task = asyncio.create_task(self.notifier.outbox.run())
+        if self.supervisor:
+            self.supervision_task = asyncio.create_task(self.supervisor.run())
+            self.supervision_task.add_done_callback(self._worker_done)
         self.worker_task = asyncio.create_task(self.worker.run(), name="home-agent-worker")
         self.worker_task.add_done_callback(self._worker_done)
 
@@ -276,6 +310,11 @@ class TelegramGateway:
             self.application.stop_running()
 
     async def _post_stop(self, _: Application[Any, Any, Any, Any, Any, Any]) -> None:
+        if self.supervisor:
+            await self.supervisor.stop()
+        if self.supervision_task:
+            self.supervision_task.cancel()
+            await asyncio.gather(self.supervision_task, return_exceptions=True)
         await self.worker.stop()
         if self.worker_task:
             await asyncio.gather(self.worker_task, return_exceptions=True)
@@ -287,6 +326,8 @@ class TelegramGateway:
             await self.notifier.outbox.stop()
         if self.outbox_task:
             await self.outbox_task
+        if self.supervisor:
+            await self.supervisor.reviewer.close()
         await self.codex.close()
 
     async def help_command(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:

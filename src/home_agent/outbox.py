@@ -40,8 +40,8 @@ class Outbox:
                     attempts = row["attempts"] + 1
                     with self.database.connect() as db:
                         db.execute(
-                            "UPDATE outbox SET attempts=?,due_at=? WHERE job_id=?",
-                            (attempts, time.time() + min(60, 2**attempts), job.id),
+                            "UPDATE outbox SET attempts=?,due_at=? WHERE job_id=? AND revision=?",
+                            (attempts, time.time() + min(60, 2**attempts), job.id, row["revision"]),
                         )
                     self.database.record_event(
                         "outbox_failed",
@@ -50,7 +50,10 @@ class Outbox:
                     )
                 else:
                     with self.database.connect() as db:
-                        db.execute("UPDATE outbox SET delivered=1 WHERE job_id=?", (job.id,))
+                        db.execute(
+                            "UPDATE outbox SET delivered=1 WHERE job_id=? AND revision=?",
+                            (job.id, row["revision"]),
+                        )
                     with self.database.connect() as db:
                         receipt = db.execute(
                             "SELECT details FROM interaction_events WHERE job_id=? "

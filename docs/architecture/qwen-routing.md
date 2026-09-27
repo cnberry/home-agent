@@ -1,6 +1,7 @@
 # Qwen-first home control with Codex fallback
 
-Status: implemented by the local-Qwen PR; opt in using `[agent].routing_config`.
+Status: implemented; opt in using `[agent].routing_config`. Version 0.4.5 adds
+[Codex supervision and regression-gated learning](qwen-supervision.md).
 Deployment and measured acceptance results are recorded separately from the design.
 
 Home Agent owns owner authentication, the durable FIFO queue, interpretation,
@@ -64,7 +65,8 @@ Only configured operations in the inventory action allowlist become capabilities
    a shorter overlapping alias, but retain distinct targets elsewhere in the message.
 2. Multiple targets or compound requests use Codex before any local dispatch.
 3. Qwen returns only `{"op": N}`: a candidate operation number, `0` for clarification,
-   or `-1` for complex work. Schema-constrained output is limited to 12 tokens.
+   or `-1` for complex work. Unrecognized targets and `0`/invalid results now reach
+   Codex before any local dispatch. Schema-constrained output is limited to 12 tokens.
 4. Code extracts an explicit numeric temperature or named heating mode. Validate
    the native unit, bounds and whole-degree requirement; never invent a setpoint.
    This first release supports Fahrenheit locally; Celsius requests ask for clarification.

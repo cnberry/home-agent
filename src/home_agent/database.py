@@ -147,6 +147,24 @@ class Database:
                     ON interaction_events(update_id) WHERE event = 'received';
             """)
 
+            columns = {row[1] for row in db.execute("PRAGMA table_info(outbox)")}
+            if "revision" not in columns:
+                db.execute("ALTER TABLE outbox ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS local_reviews (
+                    job_id INTEGER NOT NULL REFERENCES jobs(id), attempt INTEGER NOT NULL,
+                    evidence TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0, due_at REAL NOT NULL DEFAULT 0,
+                    result TEXT, error TEXT, PRIMARY KEY(job_id,attempt)
+                );
+                CREATE TABLE IF NOT EXISTS routing_examples (
+                    job_id INTEGER NOT NULL, attempt INTEGER NOT NULL,
+                    catalog_version TEXT NOT NULL, prompt TEXT NOT NULL,
+                    capability TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(job_id,attempt)
+                );
+            """)
+
     def _job_event(self, db: sqlite3.Connection, event: str, job_id: int) -> None:
         job = self.get_job(job_id, connection=db)
         if job is not None:
@@ -352,7 +370,8 @@ class Database:
                 )
                 db.execute(
                     "INSERT INTO outbox(job_id,text) VALUES(?,?) ON CONFLICT(job_id) DO "
-                    "UPDATE SET text=excluded.text,delivered=0,attempts=0,due_at=0",
+                    "UPDATE SET text=excluded.text,delivered=0,attempts=0,due_at=0,"
+                    "revision=revision+1",
                     (job_id, text or "Done."),
                 )
 

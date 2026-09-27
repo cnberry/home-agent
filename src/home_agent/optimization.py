@@ -77,6 +77,12 @@ def export_interactions(settings: Settings, directory: Path) -> dict[str, Any]:
                 (start.isoformat(), end.isoformat()),
             )
         ]
+        local_reviews = [
+            dict(r) for r in db.execute("SELECT * FROM local_reviews ORDER BY job_id,attempt")
+        ]
+        routing_examples = [
+            dict(r) for r in db.execute("SELECT * FROM routing_examples ORDER BY job_id,attempt")
+        ]
         all_time = dict(
             db.execute(
                 "SELECT COUNT(*) AS jobs, SUM(status='completed') AS completed, "
@@ -125,7 +131,13 @@ def export_interactions(settings: Settings, directory: Path) -> dict[str, Any]:
         "Completion is not delivery; use delivered/reply_delivered for transport latency. "
         "Earlier jobs may have no events. Unknown costs/usage are not zero.",
     }
-    for name, rows in (("events", events), ("jobs", jobs), ("job-history", history)):
+    for name, rows in (
+        ("events", events),
+        ("jobs", jobs),
+        ("job-history", history),
+        ("local-reviews", local_reviews),
+        ("routing-examples", routing_examples),
+    ):
         write_private(
             directory / f"{name}.jsonl", "".join(redact(json.dumps(row)) + "\n" for row in rows)
         )
@@ -176,6 +188,14 @@ async def review(settings: Settings, *, report_only: bool = False) -> int:
             f"Review date: {summary['local_date']}\n"
             f"Runtime model: {settings.model}; reasoning: {settings.reasoning_effort}\n"
             "Write the private evaluation/release/deployment ledger inside the report directory.\n"
+            "Review EVERY local-reviews.jsonl failure/incorrect/uncertain result, including older "
+            "needs_attention and deferred/rejected learning. Inspect routing-examples.jsonl. "
+            "Classify recognition failures separately from hardware/outage/validation failures. "
+            "Add sanitized tests and improve Qwen prompts/routing for each unresolved "
+            "recognition pattern; replay classification only, never historical device commands. "
+            "Evaluate prompts against all retained cases and canonical safety cases before "
+            "promotion. Do not activate rejected/deferred examples without this evaluation. "
+            "Record a resolution or blocker for every failure; never silently drop cases.\n"
         )
         runtime = CodexRuntime(
             checkout,

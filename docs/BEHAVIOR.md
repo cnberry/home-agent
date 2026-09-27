@@ -85,3 +85,16 @@ acceptance, queueing, inference, native CLI issue, verification and reply delive
 separately, targeting >99% verified success and <1 second receipt-to-issue.
 See [architecture and state diagrams](architecture/qwen-routing.md) for precise
 boundaries, denominators, compatibility behavior, limitations and rollback.
+
+
+### Supervision of local results
+
+Local recognition misses reach Codex before device execution instead of ending as
+successful generic clarifications. Local outcomes are recorded for independent,
+restricted Codex review. Incorrect results generate a durable corrective notice;
+possible side effects are never automatically repeated. Reviewed recognition
+corrections can become bounded private prompt examples only after classification
+regression checks, with rejected/deferred cases retained for the nightly loop.
+Review outages do not stop foreground local commands. See
+[supervision architecture](architecture/qwen-supervision.md) for state, rollback,
+metrics and learning limits.

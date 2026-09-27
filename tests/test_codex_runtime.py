@@ -34,8 +34,14 @@ def sdk(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         thread_start=AsyncMock(return_value=thread),
         thread_resume=AsyncMock(return_value=thread),
     )
-    monkeypatch.setattr(runtime_module, "AsyncCodex", lambda config: client)
-    return SimpleNamespace(client=client, thread=thread, handle=handle)
+    configs = []
+
+    def create(config):
+        configs.append(config)
+        return client
+
+    monkeypatch.setattr(runtime_module, "AsyncCodex", create)
+    return SimpleNamespace(client=client, thread=thread, handle=handle, configs=configs)
 
 
 @pytest.fixture
@@ -194,3 +200,26 @@ async def test_deadline_covers_setup_and_turn_and_survives_interrupt_failure(
     assert raised.value.turn_started is (phase == "run")
     assert finished.is_set()
     assert not await runtime.interrupt()
+
+
+@pytest.mark.asyncio
+async def test_review_runtime_cannot_inherit_general_agent_execution_policy(sdk, tmp_path):
+    runtime = CodexRuntime(
+        tmp_path,
+        tmp_path / "home",
+        timeout_seconds=10,
+        model="gpt-5.6-luna",
+        reasoning_effort="low",
+        review_only=True,
+    )
+    await run(runtime, "general-thread-must-not-resume")
+    sdk.client.thread_resume.assert_not_awaited()
+    assert "features.shell_tool=false" in sdk.configs[-1].config_overrides
+    assert "features.unified_exec=false" in sdk.configs[-1].config_overrides
+    for call in (sdk.client.thread_start.await_args, sdk.thread.turn.await_args):
+        assert call.kwargs["sandbox"] == Sandbox.read_only
+        assert call.kwargs["approval_mode"] == ApprovalMode.deny_all
+    assert (
+        "passwordless sudo"
+        not in sdk.client.thread_start.await_args.kwargs["developer_instructions"]
+    )
