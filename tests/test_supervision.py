@@ -263,3 +263,30 @@ async def test_uncertain_review_never_becomes_training_label(tmp_path):
     with db.connect() as conn:
         result = json.loads(conn.execute("SELECT result FROM local_reviews").fetchone()[0])
     assert result["learning"] == "uncertain_needs_review"
+
+
+@pytest.mark.parametrize("runtime_writable", [True, False])
+def test_reviewer_workspace_uses_runtime_and_failure_preserves_gateway(
+    tmp_path, settings, monkeypatch, runtime_writable
+):
+    from dataclasses import replace
+    from pathlib import Path
+
+    from home_agent.telegram_gateway import TelegramGateway
+
+    cfg, _ = fixture(tmp_path)
+    settings = replace(settings, routing_config=cfg)
+    original = Path.mkdir
+
+    def restricted_mkdir(path, *args, **kwargs):
+        if path == settings.data_dir / "supervision" or (
+            not runtime_writable and path == settings.database_path.parent / "supervision"
+        ):
+            raise PermissionError("Service cannot create this directory")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", restricted_mkdir)
+    monkeypatch.setattr("home_agent.telegram_gateway.CodexRuntime", lambda *a, **k: Runtime("ok"))
+    gateway = TelegramGateway(settings, "123456:fake-token")
+    assert (gateway.supervisor is not None) == runtime_writable
+    assert gateway.worker is not None

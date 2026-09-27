@@ -44,7 +44,7 @@ flowchart TD
 
 ## Review boundary and delivery
 
-The reviewer uses the pinned stable Codex SDK, a separate empty workspace, a fresh
+The reviewer uses the pinned stable Codex SDK, a separate empty workspace under the service-owned runtime directory, a fresh
 thread, read-only sandbox and deny-all approvals. Shell/unified execution, web
 search and apps are disabled; configured MCP servers/plugins (including selected
 profile entries) are disabled. Its developer instructions treat all interaction
