@@ -186,9 +186,9 @@ class TelegramGateway:
                 and self.worker.router.config.get("supervision_enabled", True)
             ):
                 # Separate empty workspace prevents project instructions/extensions entering audits.
-                review_workspace = settings.data_dir / "supervision"
-                review_workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+                review_workspace = settings.database_path.parent / "supervision"
                 try:
+                    review_workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
                     reviewer = CodexRuntime(
                         review_workspace,
                         settings.codex_home,
