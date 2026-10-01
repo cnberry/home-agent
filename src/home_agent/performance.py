@@ -19,6 +19,16 @@ BOOT_ID = (
     if Path("/proc/sys/kernel/random/boot_id").exists()
     else "unknown"
 )
+RELEASE_REVISION_FILE = Path(__file__).resolve().parents[2] / ".release-revision"
+
+
+def release_revision() -> str:
+    """Return the immutable release revision, ignoring stale service overrides."""
+    try:
+        revision = RELEASE_REVISION_FILE.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        revision = ""
+    return revision or os.environ.get("HOME_AGENT_REVISION", __version__)
 
 
 def accepted(database: Database, job: Job, received_ns: int, source: str) -> None:
@@ -51,7 +61,7 @@ class Performance:
             "attempt": job.attempts,
             "engine": "codex",
             "eligible": False,
-            "release": os.environ.get("HOME_AGENT_REVISION", __version__),
+            "release": release_revision(),
             "runtime_version": __version__,
             "boot_id": BOOT_ID,
         }
