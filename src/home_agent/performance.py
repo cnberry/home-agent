@@ -19,7 +19,18 @@ BOOT_ID = (
     if Path("/proc/sys/kernel/random/boot_id").exists()
     else "unknown"
 )
-RELEASE_REVISION_FILE = Path(__file__).resolve().parents[2] / ".release-revision"
+
+
+def _find_release_revision_file(module_file: Path) -> Path:
+    resolved = module_file.resolve()
+    for parent in resolved.parents:
+        candidate = parent / ".release-revision"
+        if candidate.is_file():
+            return candidate
+    return resolved.parents[2] / ".release-revision"
+
+
+RELEASE_REVISION_FILE = _find_release_revision_file(Path(__file__))
 
 
 def release_revision() -> str:
