@@ -262,6 +262,24 @@ async def test_stop_interrupts_active_work_and_new_waits_for_queue_to_clear(
 
 
 @pytest.mark.asyncio
+async def test_queued_message_wakes_idle_worker_after_acknowledgement(
+    gateway: tuple[TelegramGateway, TelegramAPI, Runtime],
+) -> None:
+    value, api, runtime = gateway
+    value.worker.poll_seconds = 1.0
+    task = asyncio.create_task(value.worker.run())
+    try:
+        await asyncio.sleep(0.05)
+        await value.application.process_update(telegram_update(value))
+        await asyncio.wait_for(runtime.entered.wait(), 0.5)
+        assert api.messages[0][1]["text"] == "Queued #1."
+        await wait_for_job(value, 1, "completed")
+    finally:
+        await value.worker.stop()
+        await asyncio.wait_for(task, 2)
+
+
+@pytest.mark.asyncio
 async def test_retry_requeues_uncertain_work_but_duplicate_command_does_not_repeat_it(
     gateway: tuple[TelegramGateway, TelegramAPI, Runtime],
 ) -> None:

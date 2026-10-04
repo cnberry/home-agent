@@ -105,8 +105,10 @@ install -d -o root -g root -m 0700 "$config_root/credentials"
 
 if git -C "$source_root" rev-parse --verify HEAD >/dev/null 2>&1; then
   version=$(git -C "$source_root" rev-parse --short=12 HEAD)
+  release_revision=$(git -C "$source_root" rev-parse HEAD)
 else
   version="source-$(date -u +%Y%m%d%H%M%S)"
+  release_revision="$version"
 fi
 release_dir="$install_root/releases/$version"
 if [[ ! -f "$release_dir/.build-complete" ]]; then
@@ -117,12 +119,15 @@ if [[ ! -f "$release_dir/.build-complete" ]]; then
     cp -a "$source_root/." "$release_dir/"
     rm -rf -- "$release_dir/.git"
   fi
+  printf '%s\n' "$release_revision" > "$release_dir/.release-revision"
   chown -R root:root "$release_dir"
-  chmod -R go-w "$release_dir"
   python3 -m venv "$release_dir/venv"
   "$release_dir/venv/bin/python" -m pip install --disable-pip-version-check --require-hashes -r "$release_dir/requirements.lock"
   "$release_dir/venv/bin/python" -m pip install --disable-pip-version-check \
     --no-build-isolation --no-deps "$release_dir"
+  # Release contents are root-owned, but the service user must traverse and read them.
+  # Apply this after venv creation and installation, which may create restrictive dirs.
+  chmod -R go+rX,go-w "$release_dir"
   "$release_dir/venv/bin/python" -c 'import home_agent'
   touch "$release_dir/.build-complete"
 fi

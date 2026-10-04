@@ -1,4 +1,5 @@
 """Dedicated panel FIFO and conversation using the shared Home Agent runtime."""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +10,7 @@ from dataclasses import replace
 
 from home_agent.codex_runtime import CodexResult, CodexRuntime
 from home_agent.config import Settings
+from home_agent.control import ControlServer
 from home_agent.database import Database, Job
 from home_agent.worker import Worker
 
@@ -26,8 +28,10 @@ Other Home Agent conversations can operate concurrently; inspect current state b
 def panel_settings(settings: Settings) -> Settings:
     path = settings.database_path
     return replace(
-        settings, database_path=path.with_name(path.stem + ".panel" + path.suffix),
+        settings,
+        database_path=path.with_name(path.stem + ".panel" + path.suffix),
         turn_timeout_seconds=min(settings.turn_timeout_seconds, 120),
+        routing_config=None,
     )
 
 
@@ -42,10 +46,13 @@ class PanelRuntime:
 
     def open(self) -> CodexRuntime:
         return CodexRuntime(
-            self.settings.workspace, self.settings.codex_home,
+            self.settings.workspace,
+            self.settings.codex_home,
             timeout_seconds=self.settings.turn_timeout_seconds,
-            model=self.model, reasoning_effort=self.reasoning_effort,
-            developer_instructions=PANEL_INSTRUCTIONS, client_title="Home Agent Panel",
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            developer_instructions=PANEL_INSTRUCTIONS,
+            client_title="Home Agent Panel",
         )
 
     async def authenticated(self) -> bool:
@@ -56,14 +63,20 @@ class PanelRuntime:
             await runtime.close()
 
     async def run(
-        self, prompt: str, *, thread_id: str | None,
-        on_thread: Callable[[str], None], on_turn_started: Callable[[], None],
+        self,
+        prompt: str,
+        *,
+        thread_id: str | None,
+        on_thread: Callable[[str], None],
+        on_turn_started: Callable[[], None],
     ) -> CodexResult:
         runtime = self.open()
         self.active = runtime
         try:
             return await runtime.run(
-                prompt, thread_id=thread_id, on_thread=on_thread,
+                prompt,
+                thread_id=thread_id,
+                on_thread=on_thread,
                 on_turn_started=on_turn_started,
             )
         finally:
@@ -112,13 +125,20 @@ async def run_panel(settings: Settings) -> None:
         database.recover_interrupted()
         runtime = PanelRuntime(settings)
         worker = Worker(
-            database, runtime, PanelNotifier(), poll_seconds=settings.worker_poll_seconds
+            database,
+            runtime,
+            PanelNotifier(),
+            poll_seconds=settings.worker_poll_seconds,
+            event_driven=True,
         )
+        control = ControlServer(database, worker, settings.database_path.with_suffix(".sock"))
+        worker.on_result = control.notify
         stopped = asyncio.Event()
         loop = asyncio.get_running_loop()
         for signum in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(signum, stopped.set)
         try:
+            await control.start()
             database.set_metadata("authentication_degraded", not await runtime.authenticated())
             running = asyncio.create_task(worker.run())
             stopping = asyncio.create_task(stopped.wait())
@@ -137,6 +157,7 @@ async def run_panel(settings: Settings) -> None:
                     running.cancel()
                 await asyncio.gather(running, stopping, return_exceptions=True)
         finally:
+            await control.close()
             await runtime.close()
             for signum in (signal.SIGTERM, signal.SIGINT):
                 loop.remove_signal_handler(signum)

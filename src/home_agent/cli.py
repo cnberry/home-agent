@@ -63,6 +63,12 @@ def run_panel_agent(args: argparse.Namespace) -> int:
 
 def queue_heartbeat(args: argparse.Namespace) -> int:
     settings = _settings(args)
+    if settings.routing_config:
+        from home_agent.control import heartbeat
+
+        result = heartbeat(settings.database_path.with_suffix(".sock"), args.force)
+        print(json.dumps(result))
+        return 1 if "error" in result else 0
     database = Database(settings.database_path, settings.max_queue)
     database.initialize()
     try:
@@ -228,6 +234,18 @@ def bridge(args: argparse.Namespace) -> int:
         )
         return 2
 
+    if settings.routing_config or args.command == "panel-bridge":
+        from home_agent.control import submit
+
+        result = submit(
+            settings.database_path.with_suffix(".sock"),
+            prompt,
+            args.wait_timeout,
+            getattr(args, "source", "bridge"),
+            getattr(args, "request_id", None),
+        )
+        print(result.get("response") or result.get("error") or result.get("status"))
+        return 0 if result.get("status") == "completed" else 1
     database = Database(settings.database_path, settings.max_queue)
     database.initialize()
     try:
@@ -264,6 +282,14 @@ def bridge(args: argparse.Namespace) -> int:
     return 124
 
 
+def performance_report(args: argparse.Namespace) -> int:
+    from home_agent.performance import report
+
+    settings = _settings(args)
+    print(json.dumps(report(Database(settings.database_path), args.since, args.source), indent=2))
+    return 0
+
+
 def optimize(args: argparse.Namespace) -> int:
     from home_agent.optimization import run_review
 
@@ -275,6 +301,10 @@ def deployment_pause(args: argparse.Namespace) -> int:
     database = Database(settings.database_path, settings.max_queue)
     database.initialize()
     database.set_metadata("deployment_paused", not args.resume)
+    if settings.routing_config:
+        from home_agent.control import wake
+
+        wake(settings.database_path.with_suffix(".sock"))
     if not args.resume:
         deadline = time.monotonic() + 120
         while database.active_job() is not None:
@@ -286,11 +316,46 @@ def deployment_pause(args: argparse.Namespace) -> int:
     return 0
 
 
+def supervision_status(args: argparse.Namespace) -> int:
+    settings = _settings(args)
+    database = Database(settings.database_path)
+    database.initialize()
+    with database.connect() as db:
+        states = {
+            r[0]: r[1]
+            for r in db.execute("SELECT status,COUNT(*) FROM local_reviews GROUP BY status")
+        }
+        outcomes = [
+            json.loads(r[0])
+            for r in db.execute("SELECT result FROM local_reviews WHERE result IS NOT NULL")
+        ]
+        active = db.execute("SELECT COUNT(*) FROM routing_examples WHERE active=1").fetchone()[0]
+    print(
+        json.dumps(
+            {
+                "reviews": states,
+                "active_examples": active,
+                "incorrect": sum(r.get("verdict") == "incorrect" for r in outcomes),
+                "uncertain": sum(r.get("verdict") == "uncertain" for r in outcomes),
+                "learning": {
+                    key: sum(r.get("learning") == key for r in outcomes)
+                    for key in sorted({r.get("learning", "unknown") for r in outcomes})
+                },
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentctl")
     parser.add_argument("--config", help="configuration path")
     parser.add_argument("--verbose", action="store_true")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    supervision = subparsers.add_parser("supervision", help="show durable local review health")
+    supervision.set_defaults(func=supervision_status)
 
     optimizer = subparsers.add_parser("optimize", help="run the daily improvement review")
     optimizer.add_argument("--report-only", action="store_true")
@@ -331,9 +396,19 @@ def build_parser() -> argparse.ArgumentParser:
         "bridge", help="queue a Telegram-thread turn and print its response"
     )
     bridge_parser.add_argument("--wait-timeout", type=int, default=3000)
+    bridge_parser.add_argument("--source", choices=["bridge", "benchmark"], default="bridge")
+    bridge_parser.add_argument("--request-id")
     bridge_parser.set_defaults(func=bridge)
+    perf_parser = subparsers.add_parser(
+        "performance", help="report private success and latency evidence"
+    )
+    perf_parser.add_argument("--since", default="1970-01-01")
+    perf_parser.add_argument("--source", choices=["telegram", "bridge", "benchmark"])
+    perf_parser.set_defaults(func=performance_report)
+
     panel_bridge = subparsers.add_parser("panel-bridge", help="queue a dedicated panel turn")
-    panel_bridge.add_argument("--wait-timeout", type=int, default=3000)
+    panel_bridge.add_argument("--wait-timeout", type=int, default=150)
+    panel_bridge.add_argument("--request-id")
     panel_bridge.set_defaults(func=bridge)
     return parser
 

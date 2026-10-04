@@ -227,7 +227,21 @@ The default model is `gpt-5.6-luna` with `low` reasoning for responsive, cost-se
 work. Override `agent.model` and `agent.reasoning_effort` in `/etc/home-agent/config.toml` when a
 task profile needs more capability.
 
+## CPU local-intent experiment
+
+For an optional CPU-only device-command latency experiment, see
+[local Qwen intent worker](experiments/local-intent/README.md). It includes pinned
+installation, immediate socket wakeup, and an opt-in benchmark. The production
+Codex/Telegram path is unchanged.
+
+The approved [Qwen-first routing architecture](docs/architecture/qwen-routing.md)
+describes the planned Telegram integration, durable state transitions, immediate
+wakeups, and Codex fallback. This production integration is not implemented yet.
+
 ## Independent panel queue
+
+See the [panel queue architecture](docs/architecture/panel-queue.md) for lifecycle
+and deployment boundaries.
 
 `agentctl panel-run` runs a dedicated panel worker using the same pinned Codex SDK,
 workspace, login and tools. `agentctl panel-bridge` accepts a prompt on stdin and
@@ -244,8 +258,11 @@ A process lock prevents two panel workers from consuming the same queue.
 
 A deployment must authenticate access to `panel-bridge`; it is an administrative
 interface with the same Home Agent authority. Private socket/gateway configuration
-and device UI belong in the client deployment repository. No network listener is
-added by these CLI commands.
+and device UI belong in the client deployment repository. The worker owns a private Unix socket beside its database; no TCP listener is
+added. Submissions wake the worker immediately. Pass a stable `--request-id` to
+`panel-bridge` to retrieve an existing request without replaying it. A bridge
+timeout leaves accepted work durable. Panel turns use Codex directly; Telegram
+Qwen routing and its supervision remain independent.
 
 ## Telegram commands
 

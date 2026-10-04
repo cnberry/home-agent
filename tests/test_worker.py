@@ -251,6 +251,26 @@ async def test_shutdown_before_dispatch_leaves_work_for_restart(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_wake_starts_new_work_without_waiting_for_poll_timeout(tmp_path: Path) -> None:
+    database = queue(tmp_path)
+    runtime = Runtime()
+    notifications = Notifications()
+    worker = Worker(database, runtime, notifications, poll_seconds=1.0)
+    task = asyncio.create_task(worker.run())
+    try:
+        await asyncio.sleep(0.05)
+        started_wait = asyncio.get_running_loop().time()
+        job = database.enqueue("telegram", "prompt")
+        assert job is not None
+        worker.wake()
+        await asyncio.wait_for(notifications.working_started.wait(), 0.5)
+        assert asyncio.get_running_loop().time() - started_wait < 0.5
+    finally:
+        await worker.stop()
+        await asyncio.wait_for(task, 2)
+
+
+@pytest.mark.asyncio
 async def test_conversation_history_is_separate_and_new_clears_only_telegram(
     tmp_path: Path,
 ) -> None:
