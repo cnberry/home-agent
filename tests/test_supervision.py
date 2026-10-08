@@ -17,7 +17,7 @@ from home_agent.worker import Worker
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("prompt", ["Turn on the test lamps", "Turn on test lights"])
+@pytest.mark.parametrize("prompt", ["Turn on test lights"])
 async def test_recognition_failure_reaches_codex_and_leaves_review_evidence(tmp_path, prompt):
     cfg, db = fixture(tmp_path)
     worker = Worker(db, Runtime("Handled by Codex"), Notifications(), routing_config=cfg)

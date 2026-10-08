@@ -65,8 +65,10 @@ Only configured operations in the inventory action allowlist become capabilities
    a shorter overlapping alias, but retain distinct targets elsewhere in the message.
 2. Multiple targets or compound requests use Codex before any local dispatch.
 3. Qwen returns only `{"op": N}`: a candidate operation number, `0` for clarification,
-   or `-1` for complex work. Unrecognized targets and `0`/invalid results now reach
-   Codex before any local dispatch. Schema-constrained output is limited to 12 tokens.
+   or `-1` for complex work. An explicitly home-control request with no configured
+   target receives a safe clarification; `0`/invalid results and compound requests
+   reach Codex before any local dispatch. Schema-constrained output is limited to 12
+   tokens.
 4. Code extracts an explicit numeric temperature or named heating mode. Validate
    the native unit, bounds and whole-degree requirement; never invent a setpoint.
    This first release supports Fahrenheit locally; Celsius requests ask for clarification.
