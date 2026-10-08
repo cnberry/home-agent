@@ -171,8 +171,12 @@ class LocalRouter:
                 re.I,
             ):
                 return {
-                    "outcome": "fallback",
+                    "outcome": "clarify",
                     "reason": "unrecognized_home_target",
+                    "reply": (
+                        "I don't recognize that home device. Please name one configured "
+                        "device so I don't guess or change the wrong thing."
+                    ),
                 }
             return {"outcome": "fallback", "reason": "outside_catalog"}
         if len({(c["service"], c["target"]) for c in candidates}) != 1 or re.search(

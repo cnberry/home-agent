@@ -2,17 +2,19 @@
 
 ## Problem and behavior
 
-A missing device alias previously produced a terminal generic clarification before
-Qwen ran. A Qwen `op=0` response also ended the request without Codex review.
-Repeated recognition failures could therefore look like successfully completed
-jobs. Verified device readback did not establish that the interpretation matched
-the owner's request.
+A missing device alias previously reached the general Codex takeover path, where an
+unverified final response could look like a successful device action. A Qwen `op=0`
+response also ended the request without Codex review. Repeated recognition failures
+could therefore look like successfully completed jobs. Verified device readback did
+not establish that the interpretation matched the owner's request.
 
-Recognition failures now use the existing Codex takeover path **before local
-execution**, with the configured catalog and bounded recent conversation context.
-Codex resolves names or asks a genuine clarification. Native argument guards still
-refuse invalid, negated and deferred local writes. Possible side effects retain
-the existing read-only reconciliation policy; there is no automatic action replay.
+Recognized-target interpretation failures still use the existing Codex takeover path
+**before local execution**, with the configured catalog and bounded recent
+conversation context. An explicitly home-control request with no configured target
+now receives a safe clarification instead of an unverified takeover. Codex resolves
+other names or asks a genuine clarification. Native argument guards still refuse
+invalid, negated and deferred local writes. Possible side effects retain the
+existing read-only reconciliation policy; there is no automatic action replay.
 
 Every local interpretation/execution outcome and home-request routing miss is also
 recorded for a separate asynchronous Codex review. General non-home requests and
@@ -22,7 +24,8 @@ and device queue do not wait for the reviewer.
 ```mermaid
 flowchart TD
     Request --> Local[Local route and Qwen]
-    Local -->|Recognition miss, nothing issued| Takeover[Codex handles current request]
+    Local -->|Unrecognized home target| Clarify[Safe clarification]
+    Local -->|Recognized target interpretation miss| Takeover[Codex handles current request]
     Local -->|Validated| Device[Native adapter and verification]
     Local -->|Invalid arguments| Clarify[Safe clarification]
     Device -->|Possible side effect, uncertain| Observe[Read-only reconciliation]
