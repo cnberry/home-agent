@@ -19,6 +19,7 @@ from home_agent.codex_runtime import CodexRuntime
 from home_agent.config import ConfigError, Settings, load_settings
 from home_agent.database import Database, QueueFullError
 from home_agent.health import enqueue_heartbeat
+from home_agent.panel_gateway import panel_settings, run_panel
 from home_agent.telegram_gateway import TelegramGateway
 from home_agent.worker import safe_error
 
@@ -52,6 +53,11 @@ def run_agent(args: argparse.Namespace) -> int:
     settings = _settings(args)
     gateway = TelegramGateway(settings, settings.read_telegram_token())
     gateway.run()
+    return 0
+
+
+def run_panel_agent(args: argparse.Namespace) -> int:
+    asyncio.run(run_panel(_settings(args)))
     return 0
 
 
@@ -215,6 +221,8 @@ def initialize_database(args: argparse.Namespace) -> int:
 
 def bridge(args: argparse.Namespace) -> int:
     settings = _settings(args)
+    if args.command == "panel-bridge":
+        settings = panel_settings(settings)
     prompt = sys.stdin.read().strip()
     if not prompt:
         print("Bridge prompt is empty.", file=sys.stderr)
@@ -226,7 +234,7 @@ def bridge(args: argparse.Namespace) -> int:
         )
         return 2
 
-    if settings.routing_config:
+    if settings.routing_config or args.command == "panel-bridge":
         from home_agent.control import submit
 
         result = submit(
@@ -356,6 +364,9 @@ def build_parser() -> argparse.ArgumentParser:
     pause.add_argument("--resume", action="store_true")
     pause.set_defaults(func=deployment_pause)
     subparsers.add_parser("run", help="run the Telegram gateway").set_defaults(func=run_agent)
+    subparsers.add_parser("panel-run", help="run the independent panel queue").set_defaults(
+        func=run_panel_agent
+    )
     heartbeat = subparsers.add_parser("heartbeat", help="enqueue a heartbeat")
     heartbeat.add_argument("--force", action="store_true")
     heartbeat.set_defaults(func=queue_heartbeat)
@@ -394,6 +405,11 @@ def build_parser() -> argparse.ArgumentParser:
     perf_parser.add_argument("--since", default="1970-01-01")
     perf_parser.add_argument("--source", choices=["telegram", "bridge", "benchmark"])
     perf_parser.set_defaults(func=performance_report)
+
+    panel_bridge = subparsers.add_parser("panel-bridge", help="queue a dedicated panel turn")
+    panel_bridge.add_argument("--wait-timeout", type=int, default=150)
+    panel_bridge.add_argument("--request-id")
+    panel_bridge.set_defaults(func=bridge)
     return parser
 
 

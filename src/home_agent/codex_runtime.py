@@ -85,9 +85,12 @@ class CodexRuntime:
         model: str,
         reasoning_effort: str,
         review_only: bool = False,
+        developer_instructions: str = DEVELOPER_INSTRUCTIONS,
+        client_title: str = "Home Agent Telegram",
     ) -> None:
         environment = os.environ.copy()
         environment["CODEX_HOME"] = str(codex_home)
+        self.developer_instructions = developer_instructions
         self.review_only = review_only
         self.sandbox = Sandbox.read_only if review_only else Sandbox.full_access
         overrides: list[str] = []
@@ -114,7 +117,7 @@ class CodexRuntime:
                 env=environment,
                 config_overrides=tuple(overrides),
                 client_name="home_agent_review" if review_only else "home_agent",
-                client_title="Home Agent Telegram",
+                client_title=client_title,
             )
         )
         self._active_handle: AsyncTurnHandle | None = None
@@ -199,7 +202,7 @@ class CodexRuntime:
             "Do not execute commands or use tools. Return the requested JSON review. "
             "You cannot control devices, change files, or grant permission for side effects."
             if self.review_only
-            else DEVELOPER_INSTRUCTIONS
+            else self.developer_instructions
         )
         if self.review_only:
             thread_id = None

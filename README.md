@@ -238,6 +238,32 @@ The approved [Qwen-first routing architecture](docs/architecture/qwen-routing.md
 describes the planned Telegram integration, durable state transitions, immediate
 wakeups, and Codex fallback. This production integration is not implemented yet.
 
+## Independent panel queue
+
+See the [panel queue architecture](docs/architecture/panel-queue.md) for lifecycle
+and deployment boundaries.
+
+`agentctl panel-run` runs a dedicated panel worker using the same pinned Codex SDK,
+workspace, login and tools. `agentctl panel-bridge` accepts a prompt on stdin and
+returns its response. Both derive a separate `.panel.sqlite3` database alongside
+the configured main database. Panel jobs and Codex conversation IDs never enter
+the Telegram/heartbeat queue. One panel turn runs at a time; the independent
+workers can operate concurrently and share the host/workspace.
+
+Panel responses use concise plain-text instructions for a small display. The panel
+worker does not load a Telegram token or construct a Telegram notifier. The existing
+interactive job/thread label is reused only inside the separate panel database.
+Restart recovery and uncertain-action no-replay behavior are shared with Home Agent.
+A process lock prevents two panel workers from consuming the same queue.
+
+A deployment must authenticate access to `panel-bridge`; it is an administrative
+interface with the same Home Agent authority. Private socket/gateway configuration
+and device UI belong in the client deployment repository. The worker owns a private Unix socket beside its database; no TCP listener is
+added. Submissions wake the worker immediately. Pass a stable `--request-id` to
+`panel-bridge` to retrieve an existing request without replaying it. A bridge
+timeout leaves accepted work durable. Panel turns use Codex directly; Telegram
+Qwen routing and its supervision remain independent.
+
 ## Telegram commands
 
 - Plain text queues a Codex task and returns `Queued #<id>`.

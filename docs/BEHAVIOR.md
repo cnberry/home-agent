@@ -13,6 +13,9 @@ below, not the Python classes, call sequences, or source layout.
 - Accepted jobs persist across process exits, run one at a time in FIFO order,
   and respect input and queue limits. Telegram and heartbeat conversations stay
   separate; the SSH bridge shares the Telegram conversation.
+- The optional panel worker has its own bounded FIFO, persisted conversation and
+  restart recovery. A full Telegram queue does not consume panel capacity. Panel
+  results/errors never use Telegram notifications. Workers share host resources.
 - A transient failure before dispatch may retry. Once dispatch may have reached
   Codex, failure or restart must not automatically replay the job: side effects
   may already exist. An explicit owner retry is a new authorization.
