@@ -197,6 +197,42 @@ async def test_unrecognized_home_target_clarifies_without_codex_or_device_execut
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Do not turn on test lights",
+        "If it is dark, turn on test lights",
+        "Say 'turn on test lights'",
+        "How do I turn on test lights?",
+    ],
+)
+async def test_unsafe_mutation_request_does_not_fallback_when_local_model_is_unavailable(
+    tmp_path, prompt
+):
+    cfg, db = fixture(tmp_path)
+    config = json.loads(cfg.read_text())
+    config["port"] = 1
+    cfg.write_text(json.dumps(config))
+    runtime = Runtime("must not run")
+    worker = Worker(db, runtime, Notifications(), routing_config=cfg)
+    job = db.enqueue("telegram", prompt, telegram_chat_id=123)
+
+    await worker._process(db.claim_next())
+
+    stored = db.get_job(job.id)
+    assert stored is not None
+    assert stored.status == "completed"
+    assert stored.response == "Please confirm the immediate action; I have not changed anything."
+    assert not runtime.requests
+    with db.connect() as conn:
+        local = conn.execute(
+            "SELECT details FROM interaction_events WHERE event='local_result'"
+        ).fetchone()
+    assert local is not None
+    assert json.loads(local[0])["reason"] == "unsafe_mutation_request"
+
+
+@pytest.mark.asyncio
 async def test_codex_auth_failure_does_not_block_local_job(tmp_path):
     cfg, db = fixture(tmp_path)
     db.set_metadata("authentication_degraded", True)

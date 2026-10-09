@@ -19,6 +19,16 @@ from typing import Any
 from home_agent.database import Database
 from home_agent.performance import Performance
 
+UNSAFE_MUTATION_WORDS = re.compile(
+    r"\b(don't|do not|never|not|tomorrow|later|if|when|unless|after|before|"
+    r"how|explain|say|said|quote|pretend|would)\b",
+    re.I,
+)
+MUTATION_REQUEST_WORDS = re.compile(
+    r"\b(turn|switch|set|enable|disable|open|close|heat|cool|activate|deactivate|change)\b",
+    re.I,
+)
+
 
 class LocalRouter:
     def __init__(self, path: Path, database: Database | None = None):
@@ -183,6 +193,15 @@ class LocalRouter:
             r"\b(and|or|then)\b", prompt, re.I
         ):
             return {"outcome": "fallback", "reason": "multiple_targets"}
+        # Keep unsafe mutation requests out of the Codex fallback path when the
+        # local classifier is unavailable. The post-classification guard below
+        # remains as defense in depth for model decisions that miss this pattern.
+        if UNSAFE_MUTATION_WORDS.search(prompt) and MUTATION_REQUEST_WORDS.search(prompt):
+            return {
+                "outcome": "clarify",
+                "reason": "unsafe_mutation_request",
+                "reply": "Please confirm the immediate action; I have not changed anything.",
+            }
         perf.data.update(
             engine="qwen",
             catalog_version=self.catalog["version"],
@@ -220,12 +239,7 @@ class LocalRouter:
         c = candidates[op - 1]
         perf.data.update(capability=c["id"], mutation=c["mutation"])
         # Explicit negative/conditional requests cannot become immediate local writes.
-        if c["mutation"] and re.search(
-            r"\b(don't|do not|never|not|tomorrow|later|if|when|then|unless|after|before|"
-            r"how|explain|example|say|said|quote|pretend|would)\b",
-            prompt,
-            re.I,
-        ):
+        if c["mutation"] and UNSAFE_MUTATION_WORDS.search(prompt):
             return {
                 "outcome": "clarify",
                 "reply": "Please confirm the immediate action; I have not changed anything.",
