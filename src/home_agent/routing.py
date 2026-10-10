@@ -175,7 +175,7 @@ class LocalRouter:
         candidates = self.candidates(prompt)
         if not candidates:
             if re.search(
-                r"\b(lights?|lamps?|switch|tv|pool|spa|hot tub|gate|door|thermostat|"
+                r"\b(lights?|lamps?|switch|tvs?|pool|spa|hot tub|gate|door|thermostat|"
                 r"air conditioner|heater|temperature|setpoint|turn|heat|cool)\b",
                 prompt,
                 re.I,
