@@ -170,11 +170,14 @@ async def test_model_failure_falls_back_before_device_execution(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_unrecognized_home_target_clarifies_without_codex_or_device_execution(tmp_path):
+@pytest.mark.parametrize("prompt", ["Turn on the TVs", "Then the TVs back on"])
+async def test_unrecognized_home_target_clarifies_without_codex_or_device_execution(
+    tmp_path, prompt
+):
     cfg, db = fixture(tmp_path)
     runtime = Runtime("must not run")
     worker = Worker(db, runtime, Notifications(), routing_config=cfg)
-    job = db.enqueue("telegram", "Turn on the TVs", telegram_chat_id=123)
+    job = db.enqueue("telegram", prompt, telegram_chat_id=123)
     assert job is not None
 
     await worker._process(db.claim_next())

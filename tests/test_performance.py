@@ -32,4 +32,4 @@ def test_performance_prefers_release_artifact_over_stale_service_environment(
     performance = Performance(database, job)
 
     assert performance.data["release"] == "candidate-release-sha"
-    assert performance.data["runtime_version"] == "0.4.10"
+    assert performance.data["runtime_version"] == "0.4.11"
