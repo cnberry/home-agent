@@ -297,7 +297,17 @@ class Worker:
                         }
                     )
                 )
-        thread_id = self.database.get_thread(job.kind)
+        # Bridge jobs are submitted without a Telegram chat and must not share
+        # or replace the owner's persistent conversation.  They are probes and
+        # synthetic checks, not turns in the Telegram conversation.  Reusing
+        # that thread makes their context grow with unrelated owner work and
+        # can also overwrite the saved owner thread with a probe thread.
+        persistent_thread = not (job.kind == "telegram" and job.telegram_chat_id is None)
+        thread_id = self.database.get_thread(job.kind) if persistent_thread else None
+
+        def save_thread(value: str) -> None:
+            if persistent_thread:
+                self.database.set_thread(job.kind, value)
 
         def check_interrupted() -> None:
             if self._cancelled_job_id == job.id:
@@ -314,7 +324,7 @@ class Worker:
             result = await self.codex.run(
                 runtime_prompt,
                 thread_id=thread_id,
-                on_thread=lambda value: self.database.set_thread(job.kind, value),
+                on_thread=save_thread,
                 on_turn_started=mark_turn_started,
             )
         except CodexInterrupted as exc:
