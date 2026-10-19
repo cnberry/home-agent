@@ -280,8 +280,12 @@ async def test_conversation_history_is_separate_and_new_clears_only_telegram(
     worker = Worker(database, runtime, notifications, poll_seconds=0.001)
     task = asyncio.create_task(worker.run())
     try:
-        for kind, prompt in [("telegram", "first"), ("heartbeat", "check"), ("telegram", "next")]:
-            job = database.enqueue(kind, prompt)
+        for kind, prompt, chat_id in [
+            ("telegram", "first", 123),
+            ("heartbeat", "check", None),
+            ("telegram", "next", 123),
+        ]:
+            job = database.enqueue(kind, prompt, telegram_chat_id=chat_id)
             assert job is not None
             await wait_for_status(database, job.id, "completed")
         assert runtime.requests == [("first", None), ("check", None), ("next", "thread-1")]
@@ -294,6 +298,23 @@ async def test_conversation_history_is_separate_and_new_clears_only_telegram(
     finally:
         await worker.stop()
         await asyncio.wait_for(task, 2)
+
+
+@pytest.mark.asyncio
+async def test_bridge_probe_uses_a_fresh_nonpersistent_thread(
+    tmp_path: Path,
+) -> None:
+    database = queue(tmp_path)
+    database.set_thread("telegram", "owner-thread")
+    job = database.enqueue("telegram", "synthetic probe")
+    assert job is not None
+    runtime = Runtime("probe reply")
+    worker = Worker(database, runtime, Notifications(), poll_seconds=0.001)
+
+    await run_job(worker, database, job.id)
+
+    assert runtime.requests == [("synthetic probe", None)]
+    assert database.get_thread("telegram") == "owner-thread"
 
 
 @pytest.mark.asyncio
