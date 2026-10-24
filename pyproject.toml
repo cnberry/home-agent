@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools==84.0.0", "wheel==0.48.0"]
+requires = ["setuptools==84.1.0", "wheel==0.48.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "home-agent"
-version = "0.4.13"
+version = "0.4.14"
 description = "Tiny, persistent Telegram remote control for a local Codex agent"
 readme = "README.md"
 requires-python = ">=3.10"
