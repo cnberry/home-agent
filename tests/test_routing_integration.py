@@ -207,6 +207,7 @@ async def test_unrecognized_home_target_clarifies_without_codex_or_device_execut
         "If it is dark, turn on test lights",
         "Say 'turn on test lights'",
         "How do I turn on test lights?",
+        "Leave the test lights alone",
     ],
 )
 async def test_unsafe_mutation_request_does_not_fallback_when_local_model_is_unavailable(

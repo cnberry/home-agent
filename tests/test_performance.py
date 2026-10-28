@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from home_agent import __version__
 from home_agent.database import Database
 from home_agent.performance import Performance, _find_release_revision_file
 
@@ -32,4 +33,4 @@ def test_performance_prefers_release_artifact_over_stale_service_environment(
     performance = Performance(database, job)
 
     assert performance.data["release"] == "candidate-release-sha"
-    assert performance.data["runtime_version"] == "0.4.14"
+    assert performance.data["runtime_version"] == __version__

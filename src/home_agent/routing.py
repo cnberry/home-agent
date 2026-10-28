@@ -21,11 +21,11 @@ from home_agent.performance import Performance
 
 UNSAFE_MUTATION_WORDS = re.compile(
     r"\b(don't|do not|never|not|tomorrow|later|if|when|unless|after|before|"
-    r"how|explain|say|said|quote|pretend|would)\b",
+    r"how|explain|say|said|quote|pretend|would|leave)\b",
     re.I,
 )
 MUTATION_REQUEST_WORDS = re.compile(
-    r"\b(turn|switch|set|enable|disable|open|close|heat|cool|activate|deactivate|change)\b",
+    r"\b(turn|switch|set|enable|disable|open|close|heat|cool|activate|deactivate|change|leave)\b",
     re.I,
 )
 
