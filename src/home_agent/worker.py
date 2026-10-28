@@ -74,11 +74,13 @@ class Worker:
         *,
         poll_seconds: float = 1.0,
         routing_config: Path | None = None,
+        event_driven: bool = False,
     ) -> None:
         self.database = database
         self.codex = codex
         self.notifier = notifier
         self.poll_seconds = poll_seconds
+        self.event_driven = event_driven
         self.router = LocalRouter(routing_config, database) if routing_config else None
         self.on_result: Callable[[], None] = lambda: None
         self.performance: Performance | None = None
@@ -129,8 +131,10 @@ class Worker:
             await asyncio.gather(stop_task, wake_task, return_exceptions=True)
 
     def _next_wait(self) -> float | None:
-        if self.router is None:
+        if self.router is None and not self.event_driven:
             return self.poll_seconds
+        if self.router is None and self.database.get_metadata("authentication_degraded"):
+            return None
         if self.database.get_metadata("deployment_paused"):
             return None
         with self.database.connect() as db:
