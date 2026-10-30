@@ -21,13 +21,44 @@ from home_agent.performance import Performance
 
 UNSAFE_MUTATION_WORDS = re.compile(
     r"\b(don't|do not|never|not|tomorrow|later|if|when|unless|after|before|"
-    r"how|explain|say|said|quote|pretend|would|leave)\b",
+    r"how|explain|say|said|quote|pretend|would|leave|make|bright(?:er|ness)?|"
+    r"dim(?:mer|ming)?)\b",
     re.I,
 )
 MUTATION_REQUEST_WORDS = re.compile(
-    r"\b(turn|switch|set|enable|disable|open|close|heat|cool|activate|deactivate|change|leave)\b",
+    r"\b(turn|switch|set|enable|disable|open|close|heat|cool|activate|deactivate|"
+    r"change|leave|make|bright(?:er|ness)?|dim(?:mer|ming)?)\b",
     re.I,
 )
+QUOTED_MUTATION = re.compile(
+    r"(['\"])[^'\"]*\b(?:turn|switch|set|enable|disable|open|close|heat|cool|"
+    r"activate|deactivate|change|make|bright(?:er|ness)?|dim(?:mer|ming)?)\b"
+    r"[^'\"]*\1",
+    re.I,
+)
+EXPLICIT_POWER_REQUEST = re.compile(
+    r"\b(?:turn|switch)\b.*\b(?:on|off)\b|"
+    r"\b(?:enable|disable|activate|deactivate)\b|"
+    r"^\s*(?:on|off)\b.*\b(?:please|now)?\s*[.!]?\s*$",
+    re.I,
+)
+
+
+def power_action(action: Any) -> str | None:
+    normalized = str(action).casefold().replace("-", "_")
+    if normalized == "on" or normalized.endswith("_on"):
+        return "on"
+    if normalized == "off" or normalized.endswith("_off"):
+        return "off"
+    return None
+
+
+def explicit_power_action(prompt: str) -> str | None:
+    if not EXPLICIT_POWER_REQUEST.search(prompt):
+        return None
+    on = bool(re.search(r"\b(?:on|enable|activate)\b", prompt, re.I))
+    off = bool(re.search(r"\b(?:off|disable|deactivate)\b", prompt, re.I))
+    return "on" if on and not off else "off" if off and not on else None
 
 
 class LocalRouter:
@@ -88,7 +119,9 @@ class LocalRouter:
             "only op (the operation number). "
             "op=0 means clarify/no action. op=-1 means complex request for another agent. "
             "Questions about current state use status. Do not act on negations, "
-            "hypothetical, quoted or future commands. "
+            "hypothetical, quoted or future commands. If an immediate power request "
+            "explicitly says on or off, select only the matching operation; never invert it. "
+            "Unsupported changes such as brightness or dimming require clarification. "
             "Temperature requests select the temperature operation.\n"
             + json.dumps(options, separators=(",", ":"))
         )
@@ -196,7 +229,9 @@ class LocalRouter:
         # Keep unsafe mutation requests out of the Codex fallback path when the
         # local classifier is unavailable. The post-classification guard below
         # remains as defense in depth for model decisions that miss this pattern.
-        if UNSAFE_MUTATION_WORDS.search(prompt) and MUTATION_REQUEST_WORDS.search(prompt):
+        if MUTATION_REQUEST_WORDS.search(prompt) and (
+            UNSAFE_MUTATION_WORDS.search(prompt) or QUOTED_MUTATION.search(prompt)
+        ):
             return {
                 "outcome": "clarify",
                 "reason": "unsafe_mutation_request",
@@ -239,10 +274,20 @@ class LocalRouter:
         c = candidates[op - 1]
         perf.data.update(capability=c["id"], mutation=c["mutation"])
         # Explicit negative/conditional requests cannot become immediate local writes.
-        if c["mutation"] and UNSAFE_MUTATION_WORDS.search(prompt):
+        if c["mutation"] and (
+            UNSAFE_MUTATION_WORDS.search(prompt) or QUOTED_MUTATION.search(prompt)
+        ):
             return {
                 "outcome": "clarify",
                 "reply": "Please confirm the immediate action; I have not changed anything.",
+            }
+        requested_power = explicit_power_action(prompt)
+        if requested_power and any(
+            power_action(candidate.get("action")) for candidate in candidates
+        ) and power_action(c.get("action")) != requested_power:
+            return {
+                "outcome": "fallback",
+                "reason": "local_intent_conflict",
             }
         value = None
         if c.get("parameter") == "temperature":

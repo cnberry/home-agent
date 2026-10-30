@@ -208,6 +208,8 @@ async def test_unrecognized_home_target_clarifies_without_codex_or_device_execut
         "Say 'turn on test lights'",
         "How do I turn on test lights?",
         "Leave the test lights alone",
+        "Make the test lights brighter",
+        "What does 'turn on the test lights' mean?",
     ],
 )
 async def test_unsafe_mutation_request_does_not_fallback_when_local_model_is_unavailable(
@@ -234,6 +236,42 @@ async def test_unsafe_mutation_request_does_not_fallback_when_local_model_is_una
         ).fetchone()
     assert local is not None
     assert json.loads(local[0])["reason"] == "unsafe_mutation_request"
+
+
+@pytest.mark.asyncio
+async def test_explicit_power_mismatch_falls_back_before_adapter_dispatch(tmp_path):
+    cfg, db = fixture(tmp_path)
+    catalog_path = tmp_path / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["capabilities"].extend(
+        [
+            {
+                "id": "switch:test:off",
+                "service": "switch",
+                "target": "test",
+                "aliases": ["test lights"],
+                "action": "off",
+                "label": "off test lights",
+                "mutation": True,
+            },
+            {
+                "id": "switch:test:status",
+                "service": "switch",
+                "target": "test",
+                "aliases": ["test lights"],
+                "action": "status",
+                "label": "status test lights",
+                "mutation": False,
+            },
+        ]
+    )
+    catalog_path.write_text(json.dumps(catalog))
+    router = LocalRouter(cfg, db)
+    router.classify = lambda *_: {"op": 2}
+    job = db.enqueue("telegram", "Switch on test lights")
+    assert job is not None
+    result = await router.run("Switch on test lights", Performance(db, job), lambda: None)
+    assert result == {"outcome": "fallback", "reason": "local_intent_conflict"}
 
 
 @pytest.mark.asyncio
