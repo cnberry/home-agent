@@ -42,6 +42,9 @@ EXPLICIT_POWER_REQUEST = re.compile(
     r"^\s*(?:on|off)\b.*\b(?:please|now)?\s*[.!]?\s*$",
     re.I,
 )
+NATURAL_ALIAS_EXPANSIONS = {
+    "living tv": "living room tv",
+}
 
 
 def power_action(action: Any) -> str | None:
@@ -59,6 +62,15 @@ def explicit_power_action(prompt: str) -> str | None:
     on = bool(re.search(r"\b(?:on|enable|activate)\b", prompt, re.I))
     off = bool(re.search(r"\b(?:off|disable|deactivate)\b", prompt, re.I))
     return "on" if on and not off else "off" if off and not on else None
+
+
+def alias_variants(aliases: list[str]) -> list[str]:
+    variants = list(aliases)
+    for alias in aliases:
+        expansion = NATURAL_ALIAS_EXPANSIONS.get(" ".join(alias.casefold().split()))
+        if expansion:
+            variants.append(expansion)
+    return variants
 
 
 class LocalRouter:
@@ -95,8 +107,8 @@ class LocalRouter:
                     ]
         matches = []
         for c in self.catalog["capabilities"]:
-            for name in c["aliases"]:
-                compact_name = re.sub(r"[\s_-]+", "", name)
+            for alias in alias_variants(c["aliases"]):
+                compact_name = re.sub(r"[\s_-]+", "", alias)
                 separator_tolerant = r"[\s_-]*".join(map(re.escape, compact_name))
                 pattern = r"(?<!\w)" + separator_tolerant + r"(?!\w)"
                 for m in re.finditer(pattern, prompt, re.I):
@@ -113,7 +125,10 @@ class LocalRouter:
         candidates: list[dict[str, Any]],
         examples: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        options = [{"op": i + 1, "request": c["label"]} for i, c in enumerate(candidates)]
+        options = [
+            {"op": i + 1, "request": c["label"], "aliases": alias_variants(c["aliases"])}
+            for i, c in enumerate(candidates)
+        ]
         instruction = (
             "Translate the user request into ONE operation below. Output JSON with "
             "only op (the operation number). "
@@ -121,6 +136,8 @@ class LocalRouter:
             "Questions about current state use status. Do not act on negations, "
             "hypothetical, quoted or future commands. If an immediate power request "
             "explicitly says on or off, select only the matching operation; never invert it. "
+            "Natural phrasing may include an alias expansion shown in the aliases field, "
+            "such as 'living room tv' for 'living tv'; do not infer any other target. "
             "Unsupported changes such as brightness or dimming require clarification. "
             "Temperature requests select the temperature operation.\n"
             + json.dumps(options, separators=(",", ":"))
