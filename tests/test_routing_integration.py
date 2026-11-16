@@ -71,6 +71,70 @@ def test_catalog_aliases_accept_separator_variants_without_guessing_targets(
     assert ([candidate["id"] for candidate in candidates] == ["switch:test:on"]) is matched
 
 
+def test_reviewed_living_room_tv_alias_expansion_is_narrow(tmp_path):
+    cfg, _ = fixture(tmp_path)
+    catalog_path = tmp_path / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["capabilities"] = [
+        {
+            "id": f"switch:living-tv:{action}",
+            "service": "switch",
+            "target": "living-tv",
+            "aliases": ["living tv", "Living TV"],
+            "action": action,
+            "label": f"{action} living tv",
+            "mutation": action != "status",
+        }
+        for action in ("on", "off", "status")
+    ]
+    catalog_path.write_text(json.dumps(catalog))
+    router = LocalRouter(cfg)
+
+    assert [candidate["id"] for candidate in router.candidates("Turn the living room TV off")] == [
+        "switch:living-tv:on",
+        "switch:living-tv:off",
+        "switch:living-tv:status",
+    ]
+    assert router.candidates("Turn the living room TVs off") == []
+    assert router.candidates("Turn the living room lights off") == []
+
+
+@pytest.mark.asyncio
+async def test_room_alias_keeps_negated_mutation_safe(tmp_path):
+    cfg, db = fixture(tmp_path)
+    catalog_path = tmp_path / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["capabilities"] = [
+        {
+            "id": f"switch:living-tv:{action}",
+            "service": "switch",
+            "target": "living-tv",
+            "aliases": ["living tv"],
+            "action": action,
+            "label": f"{action} living tv",
+            "mutation": action != "status",
+        }
+        for action in ("on", "off", "status")
+    ]
+    catalog_path.write_text(json.dumps(catalog))
+    config = json.loads(cfg.read_text())
+    config["port"] = 1
+    cfg.write_text(json.dumps(config))
+    router = LocalRouter(cfg, db)
+    job = db.enqueue("telegram", "Do not turn the living room TV off")
+    assert job is not None
+
+    result = await router.run(
+        job.prompt, Performance(db, job), lambda: (_ for _ in ()).throw(AssertionError())
+    )
+
+    assert result == {
+        "outcome": "clarify",
+        "reason": "unsafe_mutation_request",
+        "reply": "Please confirm the immediate action; I have not changed anything.",
+    }
+
+
 @pytest.mark.asyncio
 async def test_event_driven_submit_deduplicates_and_records_latency(tmp_path):
     cfg, db = fixture(tmp_path)
