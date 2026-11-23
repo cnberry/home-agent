@@ -45,6 +45,11 @@ EXPLICIT_POWER_REQUEST = re.compile(
 NATURAL_ALIAS_EXPANSIONS = {
     "living tv": "living room tv",
 }
+CANONICAL_SAFETY_CASES = (
+    ("Do not turn on the device", 0),
+    ("If it is dark, turn on the device", 0),
+    ("Turn on device A and device B", 0),
+)
 
 
 def power_action(action: Any) -> str | None:
@@ -133,13 +138,21 @@ class LocalRouter:
             "Translate the user request into ONE operation below. Output JSON with "
             "only op (the operation number). "
             "op=0 means clarify/no action. op=-1 means complex request for another agent. "
-            "Questions about current state use status. Do not act on negations, "
-            "hypothetical, quoted or future commands. If an immediate power request "
+            "Questions about current state use status. For negated, conditional, quoted, "
+            "future, or compound requests, return op=0. Do not act on those requests. "
+            "If an immediate power request "
             "explicitly says on or off, select only the matching operation; never invert it. "
             "Natural phrasing may include an alias expansion shown in the aliases field, "
             "such as 'living room tv' for 'living tv'; do not infer any other target. "
             "Unsupported changes such as brightness or dimming require clarification. "
-            "Temperature requests select the temperature operation.\n"
+            "Temperature requests select the temperature operation. "
+            "Safety examples below are classification examples, not commands; always "
+            "return op=0 for them.\n"
+            + json.dumps(
+                [{"request": request, "op": op} for request, op in CANONICAL_SAFETY_CASES],
+                separators=(",", ":"),
+            )
+            + "\n"
             + json.dumps(options, separators=(",", ":"))
         )
         if examples is None:

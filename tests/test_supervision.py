@@ -58,7 +58,15 @@ def make_review(tmp_path, *, prompt="Turn on test lights", verdict="incorrect"):
 @pytest.mark.asyncio
 async def test_monitor_correction_is_durable_and_never_executes_devices(tmp_path):
     db, job, router, reviewer = make_review(tmp_path)
-    router.classify = lambda *_: {"op": 1}
+
+    def classify(prompt, *_):
+        return {
+            "op": 0
+            if prompt.startswith(("Do not", "If it", "Say", "Turn on device A"))
+            else 1
+        }
+
+    router.classify = classify
     router.execute = AsyncMock(side_effect=AssertionError("Review cannot execute"))
     supervisor = Supervisor(db, router, reviewer, lambda: None)
     with db.connect() as conn:
@@ -103,6 +111,20 @@ async def test_new_example_cannot_regress_previous_case(tmp_path):
     with db.connect() as conn:
         row = dict(conn.execute("SELECT * FROM local_reviews").fetchone())
     await supervisor.process(row)
+    assert not router.examples(active=True)
+
+
+@pytest.mark.asyncio
+async def test_safety_case_failure_rejects_new_example(tmp_path):
+    db, _, router, reviewer = make_review(tmp_path)
+    router.classify = lambda *_: {"op": 1}
+    supervisor = Supervisor(db, router, reviewer, lambda: None)
+    with db.connect() as conn:
+        row = dict(conn.execute("SELECT * FROM local_reviews").fetchone())
+    await supervisor.process(row)
+    with db.connect() as conn:
+        result = json.loads(conn.execute("SELECT result FROM local_reviews").fetchone()[0])
+    assert result["learning"] == "rejected_regression"
     assert not router.examples(active=True)
 
 
@@ -162,7 +184,15 @@ async def test_delayed_original_delivery_cannot_lose_review_correction(tmp_path)
 async def test_promoted_example_resolves_repeated_alias_but_still_runs_interpreter(tmp_path):
     db, job, router, reviewer = make_review(tmp_path, prompt="Turn on the test lamps")
     assert not router.candidates(job.prompt)
-    router.classify = lambda *_: {"op": 1}
+
+    def classify(prompt, *_):
+        return {
+            "op": 0
+            if prompt.startswith(("Do not", "If it", "Say", "Turn on device A"))
+            else 1
+        }
+
+    router.classify = classify
     supervisor = Supervisor(db, router, reviewer, lambda: None)
     with db.connect() as conn:
         row = dict(conn.execute("SELECT * FROM local_reviews").fetchone())
