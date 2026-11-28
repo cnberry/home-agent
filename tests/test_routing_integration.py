@@ -100,6 +100,48 @@ def test_reviewed_living_room_tv_alias_expansion_is_narrow(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_unambiguous_explicit_power_uses_router_without_qwen(tmp_path):
+    cfg, db = fixture(
+        tmp_path,
+        "print(json.dumps({'event':'dispatch_ready'}),flush=True)\n"
+        "assert sys.stdin.readline().strip()=='GO'\n"
+        "print(json.dumps({'event':'result','outcome':'confirmed',"
+        "'reply':request['capability']}),flush=True)\n",
+    )
+    catalog_path = tmp_path / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["capabilities"].extend(
+        [
+            {
+                "id": f"switch:test:{action}",
+                "service": "switch",
+                "target": "test",
+                "aliases": ["test lights"],
+                "action": action,
+                "label": f"{action} test lights",
+                "mutation": action != "status",
+            }
+            for action in ("off", "status")
+        ]
+    )
+    catalog_path.write_text(json.dumps(catalog))
+    router = LocalRouter(cfg, db)
+    router.classify = lambda *_: (_ for _ in ()).throw(AssertionError("Qwen called"))
+
+    job = db.enqueue("telegram", "test")
+    assert job is not None
+    result = await router.run("Turn off test lights", Performance(db, job), lambda: None)
+
+    assert result == {"event": "result", "outcome": "confirmed", "reply": "switch:test:off"}
+    with db.connect() as connection:
+        interpreted = connection.execute(
+            "SELECT details FROM interaction_events WHERE event='interpreted'"
+        ).fetchone()
+    assert interpreted is not None
+    assert json.loads(interpreted[0])["decision"]["prompt_version"] == "deterministic_power_v1"
+
+
+@pytest.mark.asyncio
 async def test_room_alias_keeps_negated_mutation_safe(tmp_path):
     cfg, db = fixture(tmp_path)
     catalog_path = tmp_path / "catalog.json"
@@ -194,7 +236,7 @@ async def test_uncertain_dispatch_reads_only_and_does_not_fall_back(tmp_path):
     await worker._process(job)
     assert db.get_job(job.id).status == "uncertain"
     assert not worker.codex.requests
-    result = report(db, source="benchmark")["groups"]["qwen/switch:test:on"]
+    result = report(db, source="benchmark")["groups"]["deterministic/switch:test:on"]
     assert (
         result["eligible_terminal"] == 1
         and result["successes"] == 0
@@ -328,6 +370,17 @@ async def test_explicit_power_mismatch_falls_back_before_adapter_dispatch(tmp_pa
                 "mutation": False,
             },
         ]
+    )
+    catalog["capabilities"].append(
+        {
+            "id": "switch:test:on-alt",
+            "service": "switch",
+            "target": "test",
+            "aliases": ["test lights"],
+            "action": "on",
+            "label": "on test lights alt",
+            "mutation": True,
+        }
     )
     catalog_path.write_text(json.dumps(catalog))
     router = LocalRouter(cfg, db)

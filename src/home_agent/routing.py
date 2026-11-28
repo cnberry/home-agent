@@ -267,26 +267,50 @@ class LocalRouter:
                 "reason": "unsafe_mutation_request",
                 "reply": "Please confirm the immediate action; I have not changed anything.",
             }
-        perf.data.update(
-            engine="qwen",
-            catalog_version=self.catalog["version"],
-            model=self.config.get("model", "qwen-local"),
-            eligible=True,
+        requested_power = explicit_power_action(prompt)
+        power_matches = (
+            [c for c in candidates if power_action(c.get("action")) == requested_power]
+            if requested_power is not None
+            else []
         )
-        if time.monotonic() < self.retry_at:
-            return {"outcome": "fallback", "reason": "local_circuit_open"}
-        started = time.monotonic_ns()
-        try:
-            decision = await asyncio.to_thread(self.classify, prompt, candidates)
-        except Exception as exc:
-            self.failures += 1
-            if self.failures >= 3:
-                self.retry_at = time.monotonic() + 30
+        deterministic = (
+            self.mode != "observe" and requested_power is not None and len(power_matches) == 1
+        )
+        if deterministic:
+            perf.data.update(
+                engine="deterministic",
+                catalog_version=self.catalog["version"],
+                model="local-router",
+                eligible=True,
+            )
+            started = time.monotonic_ns()
+            decision = {
+                "op": candidates.index(power_matches[0]) + 1,
+                "prompt_version": "deterministic_power_v1",
+                "model_timings": {},
+            }
             perf.data["inference_ms"] = (time.monotonic_ns() - started) / 1e6
-            return {"outcome": "fallback", "reason": "local_inference_" + type(exc).__name__}
-        self.failures = 0
-        self.retry_at = 0.0
-        perf.data["inference_ms"] = (time.monotonic_ns() - started) / 1e6
+        else:
+            perf.data.update(
+                engine="qwen",
+                catalog_version=self.catalog["version"],
+                model=self.config.get("model", "qwen-local"),
+                eligible=True,
+            )
+            if time.monotonic() < self.retry_at:
+                return {"outcome": "fallback", "reason": "local_circuit_open"}
+            started = time.monotonic_ns()
+            try:
+                decision = await asyncio.to_thread(self.classify, prompt, candidates)
+            except Exception as exc:
+                self.failures += 1
+                if self.failures >= 3:
+                    self.retry_at = time.monotonic() + 30
+                perf.data["inference_ms"] = (time.monotonic_ns() - started) / 1e6
+                return {"outcome": "fallback", "reason": "local_inference_" + type(exc).__name__}
+            self.failures = 0
+            self.retry_at = 0.0
+            perf.data["inference_ms"] = (time.monotonic_ns() - started) / 1e6
         perf.data["prompt_version"] = decision.get("prompt_version", "unavailable")
         perf.event("interpreted", decision=decision)
         if self.interrupted:
@@ -311,7 +335,6 @@ class LocalRouter:
                 "outcome": "clarify",
                 "reply": "Please confirm the immediate action; I have not changed anything.",
             }
-        requested_power = explicit_power_action(prompt)
         if requested_power and any(
             power_action(candidate.get("action")) for candidate in candidates
         ) and power_action(c.get("action")) != requested_power:
